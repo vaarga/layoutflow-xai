@@ -67,6 +67,9 @@ The results will be saved in the `results` directory as a `.pt` file. To re-eval
 
 *Since the generation task is non-deterministic, there will be some variations in the results and it will not match the values of the paper perfectly. The provided weights are also not the original weights we used in the paper, as we re-trained the model after refactoring. Nonetheless, we evaluated the newly trained models and they were very close to the reported values after using `multirun`.*
 
+### about the Layout FID
+As opposed to the FID used in image generation, the Layout FID metric heavily depends on the dataset. In our experiments, we evaluated the Layout FID on RICO and PubLayNet using *pre-trained* networks. If you want to evaluate the Layout FID of a custom dataset, you will need to train an network from scratch and use the obtained features to calculate the Layout FID score. A training script for the Layout FID can for example be found in the [LayoutDM repository](https://github.com/CyberAgentAILab/layout-dm/blob/main/src/trainer/trainer/fid/train.py). 
+
 ## Training
 For training, we provide the `train.sh` file, where you can comment out the model that you would like to train. If you want to train the model with different hyperparameters, you can change the values in the `.sh` file, for example add `model.optimizer.learning_rate=0.0001` to change the learning rate.
 

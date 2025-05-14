@@ -67,7 +67,7 @@ The results will be saved in the `results` directory as a `.pt` file. To re-eval
 
 *Since the generation task is non-deterministic, there will be some variations in the results and it will not match the values of the paper perfectly. The provided weights are also not the original weights we used in the paper, as we re-trained the model after refactoring. Nonetheless, we evaluated the newly trained models and they were very close to the reported values after using `multirun`.*
 
-### about the Layout FID
+### Regarding Layout FID
 As opposed to the FID used in image generation, the Layout FID metric heavily depends on the dataset. In our experiments, we evaluated the Layout FID on RICO and PubLayNet using *pre-trained* networks. If you want to evaluate the Layout FID of a custom dataset, you will need to train an network from scratch and use the obtained features to calculate the Layout FID score. A training script for the Layout FID can for example be found in the [LayoutDM repository](https://github.com/CyberAgentAILab/layout-dm/blob/main/src/trainer/trainer/fid/train.py). 
 
 ## Training
@@ -86,11 +86,13 @@ We recommend using a single GPU for training as that has shown the best results 
 ## Citation
 If this work is helpful for your research, please cite our paper:
 ```
-@article{guerreiro2024layoutflow,
-  title={LayoutFlow: Flow Matching for Layout Generation},
+@inproceedings{guerreiro2024layoutflow,
+  title={LayoutFlow: Flow Matching For Layout Generation},
   author={Guerreiro, Julian Jorge Andrade and Inoue, Naoto and Masui, Kento and Otani, Mayu and Nakayama, Hideki},
-  journal={arXiv preprint arXiv:2403.18187},
-  year={2024}
+  booktitle={European Conference on Computer Vision},
+  pages={56--72},
+  year={2024},
+  organization={Springer}
 }
 ```
 

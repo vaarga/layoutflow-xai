@@ -25,7 +25,7 @@ python src/train.py dataset=PubLayNet model=LayoutFlow dataset.batch_size=1024
 We provide two different generative models in `src/models`, namely our flow-based approach called `LayoutFlow` and a diffusion-based approach `LayoutDMx`. The main difference between both models is just the training procedure (diffusion vs. flow). The same backbone architecture in `src/models/backbone` can be chosen for either one of them.  
 
 ### Dataset
-We trained our model on the RICO and PubLayNet dataset using the dataset split reported in [LayoutFormer++](https://arxiv.org/abs/2208.08037) and [LayoutDiffusion](https://arxiv.org/abs/2303.17189). Please download the following files from this [Hugging Face repository](https://huggingface.co/JulianGuerreiro/LayoutFlow) using (make sure you have installed git lfs, otherwise the large files will not be downloaded)
+We trained our model on the RICO and PubLayNet dataset using the dataset split reported in [LayoutFormer++](https://arxiv.org/abs/2208.08037) and [LayoutDiffusion](https://arxiv.org/abs/2303.11589). Please download the following files from this [Hugging Face repository](https://huggingface.co/JulianGuerreiro/LayoutFlow) using (make sure you have installed git lfs, otherwise the large files will not be downloaded)
 ```
 git clone https://huggingface.co/JulianGuerreiro/LayoutFlow
 ```

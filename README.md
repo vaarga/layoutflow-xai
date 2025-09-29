@@ -2,12 +2,20 @@
 This repository is the official implementation of the ECCV 2024 paper "LayoutFlow: Flow Matching for Layout Generation" ([project page](https://julianguerreiro.github.io/layoutflow/) | [paper](https://arxiv.org/pdf/2403.18187)).
 
 ## Requirements
-We used the following environement for the experiments:
+We used the following environment for the experiments:
 - Python 3.8
 - CUDA 12.4
 - Pytorch 2.2.2
 
-Other dependencies can be installed using pip as follows:
+Dependencies can be installed using uv as follows:
+```
+uv sync
+```
+And the environment can be activated using:
+```
+source .venv/bin/activate
+```
+Alternatively, you can also use the requirements file:
 ```
 pip install -r requirements.txt
 ```

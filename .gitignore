@@ -7,3 +7,5 @@ vis/
 datasets/
 *.pyc
 *.log
+.venv/
+.idea/

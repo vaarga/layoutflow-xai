@@ -87,7 +87,9 @@ def main(cfg: DictConfig):
         # Instatiate model (if generated data is not loaded from a file) 
         if not cfg.load_bbox:
             print("Loading Model...")
-            model = hydra.utils.get_class(cfg.model._target_).load_from_checkpoint(cfg.checkpoint, map_location=device)
+            model = hydra.utils.get_class(cfg.model._target_).load_from_checkpoint(
+                cfg.checkpoint, map_location=device, weights_only=False
+            )
             model.cond = cfg.cond_mask
             print(f'Conditioning mask: {model.cond}')
             print(f'Task: {cfg.task}')

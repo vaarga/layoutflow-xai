@@ -9,3 +9,4 @@ datasets/
 *.log
 .venv/
 .idea/
+.DS_Store

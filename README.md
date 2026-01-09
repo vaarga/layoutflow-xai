@@ -3,9 +3,8 @@ This repository is the official implementation of the ECCV 2024 paper "LayoutFlo
 
 ## Requirements
 We used the following environment for the experiments:
-- Python 3.8
-- CUDA 12.4
-- Pytorch 2.2.2
+- Python 3.10
+- PyTorch 2.8.0
 
 Dependencies can be installed using uv as follows:
 ```

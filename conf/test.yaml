@@ -19,6 +19,7 @@ calc_miou: False
 multirun: False
 visualize: False
 logdir: ./wandb
+only_first: False
 
 hydra:  
   output_subdir: null  

@@ -63,11 +63,12 @@ def main(cfg: DictConfig):
 
         device = torch.device(cfg.device)
         pin_memory = should_pin_memory()
+        only_first = cfg.only_first
         # Load Test dataset
         val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order}, 
                                  shuffle=False, batch_size=1024, pin_memory=pin_memory)
         test_loader = instantiate(cfg.dataset, dataset={'split': 'test', 'lex_order': cfg.lex_order}, 
-                                  shuffle=False, batch_size=1024, pin_memory=pin_memory)
+                                  shuffle=False, batch_size=1 if only_first else 1024, pin_memory=pin_memory)
        
         # Load FID Model
         if 'RICO' in cfg.experiment.expname:
@@ -111,38 +112,39 @@ def main(cfg: DictConfig):
             model = model.to(device)
             model.eval()
 
-        # Test and validation data
-        if 'RICO' in cfg.experiment.expname:
-            # RICO dataloader only contains discretized bounding boxes, for exact calculation we load continuous data
-            data = torch.load('./pretrained/rico_test.pt')
-            ltrb_bbox_test, label_test, mask_bb_test = data[...,:4], data[...,4].long(), data[...,5].bool()
-            bbox_test = convert_bbox(ltrb_bbox_test, 'ltrb->xywh')
-            gt = [[bb[:m.sum()], lab[:m.sum()]] for bb, lab, m in zip(bbox_test, label_test, mask_bb_test)]
-        else:
-            bbox_test, ltrb_bbox_test, label_test, mask_bb_test, gt =  get_data(test_loader, cfg)
-        _, ltrb_bbox_val, label_val, mask_bb_val, _ =  get_data(val_loader, cfg)
+        if not only_first:
+            # Test and validation data
+            if 'RICO' in cfg.experiment.expname:
+                # RICO dataloader only contains discretized bounding boxes, for exact calculation we load continuous data
+                data = torch.load('./pretrained/rico_test.pt')
+                ltrb_bbox_test, label_test, mask_bb_test = data[...,:4], data[...,4].long(), data[...,5].bool()
+                bbox_test = convert_bbox(ltrb_bbox_test, 'ltrb->xywh')
+                gt = [[bb[:m.sum()], lab[:m.sum()]] for bb, lab, m in zip(bbox_test, label_test, mask_bb_test)]
+            else:
+                bbox_test, ltrb_bbox_test, label_test, mask_bb_test, gt =  get_data(test_loader, cfg)
+            _, ltrb_bbox_val, label_val, mask_bb_val, _ =  get_data(val_loader, cfg)
 
-        # FID Calculations
-        feats_real = fid_model.extract_features(ltrb_bbox_test.to(device), label_test.to(device), 
-                                                (~mask_bb_test).to(device))
-        mu1 = np.mean(feats_real.cpu().numpy(), axis=0)
-        cov1 = np.cov(feats_real.cpu().numpy(), rowvar=False)
+            # FID Calculations
+            feats_real = fid_model.extract_features(ltrb_bbox_test.to(device), label_test.to(device),
+                                                    (~mask_bb_test).to(device))
+            mu1 = np.mean(feats_real.cpu().numpy(), axis=0)
+            cov1 = np.cov(feats_real.cpu().numpy(), rowvar=False)
 
-        feats_val = fid_model.extract_features(ltrb_bbox_val.to(device), label_val.to(device), 
-                                               (~mask_bb_val).to(device))
-        mu_val = np.mean(feats_val.cpu().numpy(), axis=0)
-        cov_val = np.cov(feats_val.cpu().numpy(), rowvar=False)
+            feats_val = fid_model.extract_features(ltrb_bbox_val.to(device), label_val.to(device),
+                                                   (~mask_bb_val).to(device))
+            mu_val = np.mean(feats_val.cpu().numpy(), axis=0)
+            cov_val = np.cov(feats_val.cpu().numpy(), rowvar=False)
 
-        alignment_score = compute_alignment(bbox_test, mask_bb_test, format=cfg.data.format)
-        if 'RICO' in cfg.experiment.expname:
-            # Ignore background classes in overlap calculation for RICO
-            overlap_score = compute_overlap_ignore_bg(bbox_test, label_test, mask_bb_test, format=cfg.data.format)
-        else:
-            overlap_score = compute_overlap(bbox_test, mask_bb_test, format=cfg.data.format) 
-        fid_score = calculate_frechet_distance(mu1, cov1, mu_val, cov_val)
+            alignment_score = compute_alignment(bbox_test, mask_bb_test, format=cfg.data.format)
+            if 'RICO' in cfg.experiment.expname:
+                # Ignore background classes in overlap calculation for RICO
+                overlap_score = compute_overlap_ignore_bg(bbox_test, label_test, mask_bb_test, format=cfg.data.format)
+            else:
+                overlap_score = compute_overlap(bbox_test, mask_bb_test, format=cfg.data.format)
+            fid_score = calculate_frechet_distance(mu1, cov1, mu_val, cov_val)
 
-        print(f"[Sanity check using validation data on test tata] FID Score: {fid_score:.4f} | Alignment: {100*alignment_score:.4f} | " \
-                f"Overlap: {overlap_score:.4f}")
+            print(f"[Sanity check using validation data on test tata] FID Score: {fid_score:.4f} | Alignment: {100*alignment_score:.4f} | " \
+                    f"Overlap: {overlap_score:.4f}")
 
         metrics = {'fid': [], 'alignment': [], 'overlap': [], 'miou': []}
         run_num = 10 if cfg.multirun and not cfg.load_bbox else 1
@@ -153,10 +155,16 @@ def main(cfg: DictConfig):
             else:
                 bbox, label, pad_mask, bbox_for_miou = [], [], [], []
                 # Generation layouts using the model 
-                for batch in tqdm(test_loader): 
+                for batch in tqdm(test_loader, disable=only_first):
                     batch['type'] = batch['type'].to(device)  
                     batch['bbox'] = batch['bbox'].to(device)
                     batch['mask'] = batch['mask'].to(device)
+
+                    if only_first:
+                        batch['type'] = batch['type'][:1]
+                        batch['bbox'] = batch['bbox'][:1]
+                        batch['mask'] = batch['mask'][:1]
+                        batch['length'] = batch['length'][:1]
 
                     if cfg.task == 'uncond':
                         # For unconditional generation we randomly sample the number of elements in the layout
@@ -172,6 +180,8 @@ def main(cfg: DictConfig):
                     for i, L in enumerate(batch['length']):
                         pad_maski[i, :L] = True
                     pad_mask.append(pad_maski)
+                    if only_first:
+                        break
                     if cfg.small:
                         break
                 bbox = convert_bbox(torch.cat(bbox), f'{cfg.data.format}->xywh')
@@ -179,16 +189,27 @@ def main(cfg: DictConfig):
                 for bb, cat, mask in zip(bbox, label, pad_mask):
                     L = torch.sum(mask)
                     bbox_for_miou.append([bb[:L].clone().cpu(), cat[:L].cpu()])
-                # Save the generated layouts
-                fname = f'{cfg.checkpoint.split("/")[-1][:-5]}_{cfg.task}_bbox.pt'
-                torch.save(torch.cat([bbox, label.unsqueeze(-1), pad_mask.unsqueeze(-1)], dim=-1), 
-                           f'./results/{fname}')
-                print(f'Results were saved at: ./results/{fname}')
+
+                results = torch.cat([bbox, label.unsqueeze(-1), pad_mask.unsqueeze(-1)], dim=-1)
+
+                if only_first:
+                    print(results)
+                else:
+                    # Save the generated layouts
+                    fname = f'{cfg.checkpoint.split("/")[-1][:-5]}_{cfg.task}_bbox.pt'
+                    torch.save(results, f'./results/{fname}')
+                    print(f'Results were saved at: ./results/{fname}')
 
             if cfg.task == 'uncond':
                 bbox, ltrb_bbox, label, pad_mask = bbox[:2000], ltrb_bbox[:2000], label[:2000], pad_mask[:2000]
                 bbox_for_miou = bbox_for_miou[:2000]
-            print(f"Number of samples used for evaluation: {len(label)} (Generated) and {len(label_test)} (Test)")
+
+            if only_first:
+                print(f"Number of samples used for evaluation: {len(label)} (Generated) and 1 (Test)")
+                print("[only_first] Inference complete; skipping dataset-level metrics (FID/alignment/overlap).")
+                break
+            else:
+                print(f"Number of samples used for evaluation: {len(label)} (Generated) and {len(label_test)} (Test)")
 
             feats_fake = fid_model.extract_features(ltrb_bbox, label, (~pad_mask))
             mu2 = np.mean(feats_fake.cpu().numpy(), axis=0)

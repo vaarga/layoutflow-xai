@@ -51,17 +51,23 @@ def load_generated_bbox_data(cfg, device):
     return bbox, ltrb_bbox, label, pad_mask, bbox_for_miou
 
 
+def should_pin_memory() -> bool:
+    # pin_memory is meaningful for CUDA; not supported for MPS
+    return torch.cuda.is_available()
+
+
 @hydra.main(version_base=None, config_path="../conf", config_name="test.yaml")
 def main(cfg: DictConfig):
 
     with torch.no_grad():
 
         device = torch.device(cfg.device)
+        pin_memory = should_pin_memory()
         # Load Test dataset
         val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order}, 
-                                 shuffle=False, batch_size=1024)
+                                 shuffle=False, batch_size=1024, pin_memory=pin_memory)
         test_loader = instantiate(cfg.dataset, dataset={'split': 'test', 'lex_order': cfg.lex_order}, 
-                                  shuffle=False, batch_size=1024)
+                                  shuffle=False, batch_size=1024, pin_memory=pin_memory)
        
         # Load FID Model
         if 'RICO' in cfg.experiment.expname:

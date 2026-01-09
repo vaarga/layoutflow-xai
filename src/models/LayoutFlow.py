@@ -67,7 +67,7 @@ class LayoutFlow(BaseGenModel):
         self.loss_fcn = nn.MSELoss() if loss_fcn!='l1' else nn.L1Loss()
         self.add_loss = add_loss
         self.add_loss_weight = add_loss_weight
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["backbone_model", "sampler"])
 
         
     def training_step(self, batch, batch_idx):
@@ -132,7 +132,11 @@ class LayoutFlow(BaseGenModel):
             vector_field = torch_wrapper(self, cond_x, cond_mask, cf_guidance=self.cf_guidance)
         
         # Solve NeuralODE
-        node = NeuralODE(vector_field, solver=self.ode_solver, sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+        if self.ode_solver == 'euler':
+            node = NeuralODE(vector_field, solver=self.ode_solver, sensitivity="adjoint")
+        else:
+            node = NeuralODE(vector_field, solver=self.ode_solver, sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+
         if task == 'refinement':
             traj = node.trajectory(cond_x, t_span=torch.linspace(0.97, 1, self.inference_steps))
         else:

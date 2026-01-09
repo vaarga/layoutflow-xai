@@ -20,6 +20,7 @@ class TransformerWithToken(nn.Module):
                 dim_feedforward=dim_feedforward,
             ),
             num_layers=num_layers,
+            enable_nested_tensor=False,
         )
 
     def forward(self, x, src_key_padding_mask):
@@ -219,7 +220,7 @@ class LayoutNet(nn.Module):
 
         te = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
                                         dim_feedforward=d_model // 2)
-        self.dec_transformer = nn.TransformerEncoder(te, num_layers=num_layers)
+        self.dec_transformer = nn.TransformerEncoder(te, num_layers=num_layers, enable_nested_tensor=False)
 
         self.fc_out_cls = nn.Linear(d_model, num_label)
         self.fc_out_bbox = nn.Linear(d_model, 4)

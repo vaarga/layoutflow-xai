@@ -23,8 +23,7 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # Safe to call even if 1 GPU
-    # Ensure deterministic behavior for cuDNN (may impact performance slightly)
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -48,13 +47,12 @@ def get_data(dataloader, cfg):
     return bbox, ltrb_bbox, label, mask_bb, bbox_for_miou
 
 def load_generated_bbox_data(cfg, device):
-    # Loading previously generated bounding boxes and classes from specified file
     data = torch.load(cfg.load_bbox).to(cfg.device)
     print(f"Loaded {len(data)} samples from {cfg.load_bbox}")
-    # Only use 2000 samples for unconditional generation following other methods
     if 'uncond' in cfg.task:
         data = data[:2000]
-    bbox, label, pad_mask = data[:,:,:4].to(torch.float32), data[:,:,4].to(torch.int32), data[:,:,5].to(torch.bool)
+    bbox, label, pad_mask = data[:, :, :4].to(torch.float32), data[:, :, 4].to(torch.int32), data[:, :, 5].to(
+        torch.bool)
     ltrb_bbox = convert_bbox(bbox, f'{cfg.data.format}->ltrb')
     bbox = convert_bbox(bbox, f'{cfg.data.format}->xywh')
     ltrb_bbox, label, pad_mask = ltrb_bbox.to(device), label.to(device), pad_mask.to(device)
@@ -66,7 +64,6 @@ def load_generated_bbox_data(cfg, device):
 
 
 def should_pin_memory() -> bool:
-    # pin_memory is meaningful for CUDA; not supported for MPS
     return torch.cuda.is_available()
 
 
@@ -76,44 +73,35 @@ def main(cfg: DictConfig):
     set_seed(seed)
 
     with torch.no_grad():
-
         device = torch.device(cfg.device)
         pin_memory = should_pin_memory()
-
-        # Determine mode: -1 for all data, >= 0 for specific element index
         instance_index = getattr(cfg, "instance_index", -1)
         run_all = (instance_index == -1)
+        do_explain = getattr(cfg, "explain", False)
 
-        # Load Test dataset
         val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order},
                                  shuffle=False, batch_size=1024, pin_memory=pin_memory)
-
-        # If picking a specific element, we set batch_size=1 to iterate precisely to the index
         test_loader = instantiate(cfg.dataset, dataset={'split': 'test', 'lex_order': cfg.lex_order},
                                   shuffle=False, batch_size=1 if not run_all else 1024, pin_memory=pin_memory)
 
-        # Load FID Model
         if 'RICO' in cfg.experiment.expname:
             fid_model = LayoutNet(25, 20)
             state_dict = torch.load('./pretrained/fid_rico.pth.tar', map_location='cpu')
-            # Distribution of number of elements on the canvas obtained from the training set 
-            length_dist = torch.tensor([0.0000, 0.0483, 0.0351, 0.0504, 0.0619, 0.0614, 0.0700, 0.0727, 0.0636, 0.0625, 
-                                        0.0636, 0.0552, 0.0523, 0.0400, 0.0461, 0.0534, 0.0373, 0.0333, 0.0322, 0.0276, 
+            length_dist = torch.tensor([0.0000, 0.0483, 0.0351, 0.0504, 0.0619, 0.0614, 0.0700, 0.0727, 0.0636, 0.0625,
+                                        0.0636, 0.0552, 0.0523, 0.0400, 0.0461, 0.0534, 0.0373, 0.0333, 0.0322, 0.0276,
                                         0.0333])
         else:
             fid_model = LayoutNet(5, 20)
             state_dict = torch.load('./pretrained/fid_publaynet.pth.tar', map_location='cpu')
-            # Distribution of number of elements on the canvas obtained from the training set 
-            length_dist = torch.tensor([0.0000, 0.0032, 0.0334, 0.0423, 0.0422, 0.0540, 0.0723, 0.0825, 0.0905, 0.0950, 
-                                        0.0959, 0.0895, 0.0781, 0.0620, 0.0478, 0.0359, 0.0262, 0.0188, 0.0140, 0.0097, 
+            length_dist = torch.tensor([0.0000, 0.0032, 0.0334, 0.0423, 0.0422, 0.0540, 0.0723, 0.0825, 0.0905, 0.0950,
+                                        0.0959, 0.0895, 0.0781, 0.0620, 0.0478, 0.0359, 0.0262, 0.0188, 0.0140, 0.0097,
                                         0.0066])
         state = OD([(key.split("module.")[-1], state_dict[key]) for key in state_dict])
         fid_model.to(device)
         fid_model.load_state_dict(state)
         fid_model.requires_grad_(False)
         fid_model.eval()
-        
-        # Instatiate model (if generated data is not loaded from a file) 
+
         if not cfg.load_bbox:
             print("Loading Model...")
             model = hydra.utils.get_class(cfg.model._target_).load_from_checkpoint(
@@ -122,9 +110,8 @@ def main(cfg: DictConfig):
             model.cond = cfg.cond_mask
             print(f'Conditioning mask: {model.cond}')
             print(f'Task: {cfg.task}')
-            # Distinction between Flow Model and Diffusion model
             if "Flow" in cfg.model._target_:
-                model.ode_solver=cfg.ode_solver
+                model.ode_solver = cfg.ode_solver
                 print(f'ODE Solver: {cfg.ode_solver}')
             else:
                 model.DM_model = instantiate(cfg.DM_model)
@@ -134,54 +121,43 @@ def main(cfg: DictConfig):
             model = model.to(device)
             model.eval()
 
-        # Sanity check metrics (only if processing all data)
         if run_all:
-            # Test and validation data
             if 'RICO' in cfg.experiment.expname:
-                # RICO dataloader only contains discretized bounding boxes, for exact calculation we load continuous data
                 data = torch.load('./pretrained/rico_test.pt')
-                ltrb_bbox_test, label_test, mask_bb_test = data[...,:4], data[...,4].long(), data[...,5].bool()
+                ltrb_bbox_test, label_test, mask_bb_test = data[..., :4], data[..., 4].long(), data[..., 5].bool()
                 bbox_test = convert_bbox(ltrb_bbox_test, 'ltrb->xywh')
                 gt = [[bb[:m.sum()], lab[:m.sum()]] for bb, lab, m in zip(bbox_test, label_test, mask_bb_test)]
             else:
-                bbox_test, ltrb_bbox_test, label_test, mask_bb_test, gt =  get_data(test_loader, cfg)
-            _, ltrb_bbox_val, label_val, mask_bb_val, _ =  get_data(val_loader, cfg)
-
-            # FID Calculations
+                bbox_test, ltrb_bbox_test, label_test, mask_bb_test, gt = get_data(test_loader, cfg)
+            _, ltrb_bbox_val, label_val, mask_bb_val, _ = get_data(val_loader, cfg)
             feats_real = fid_model.extract_features(ltrb_bbox_test.to(device), label_test.to(device),
                                                     (~mask_bb_test).to(device))
             mu1 = np.mean(feats_real.cpu().numpy(), axis=0)
             cov1 = np.cov(feats_real.cpu().numpy(), rowvar=False)
-
             feats_val = fid_model.extract_features(ltrb_bbox_val.to(device), label_val.to(device),
                                                    (~mask_bb_val).to(device))
             mu_val = np.mean(feats_val.cpu().numpy(), axis=0)
             cov_val = np.cov(feats_val.cpu().numpy(), rowvar=False)
-
             alignment_score = compute_alignment(bbox_test, mask_bb_test, format=cfg.data.format)
             if 'RICO' in cfg.experiment.expname:
-                # Ignore background classes in overlap calculation for RICO
                 overlap_score = compute_overlap_ignore_bg(bbox_test, label_test, mask_bb_test, format=cfg.data.format)
             else:
                 overlap_score = compute_overlap(bbox_test, mask_bb_test, format=cfg.data.format)
             fid_score = calculate_frechet_distance(mu1, cov1, mu_val, cov_val)
-
-            print(f"[Sanity check using validation data on test tata] FID Score: {fid_score:.4f} | Alignment: {100*alignment_score:.4f} | " \
-                    f"Overlap: {overlap_score:.4f}")
+            print(
+                f"[Sanity check] FID: {fid_score:.4f} | Align: {100 * alignment_score:.4f} | Overlap: {overlap_score:.4f}")
 
         metrics = {'fid': [], 'alignment': [], 'overlap': [], 'miou': []}
         run_num = 10 if cfg.multirun and not cfg.load_bbox else 1
-        for n in range(run_num):
 
+        for n in range(run_num):
             if cfg.load_bbox:
                 bbox, ltrb_bbox, label, pad_mask, bbox_for_miou = load_generated_bbox_data(cfg, device)
             else:
                 bbox, label, pad_mask, bbox_for_miou = [], [], [], []
-                # Generation layouts using the model
-                # If specific index is requested, we disable tqdm to avoid clutter while skipping
-                for i, batch in enumerate(tqdm(test_loader, disable=(not run_all))):
 
-                    # If looking for a specific element index, skip others
+                # --- GENERATION LOOP ---
+                for i, batch in enumerate(tqdm(test_loader, disable=(not run_all))):
                     if not run_all:
                         if i != instance_index:
                             continue
@@ -191,23 +167,35 @@ def main(cfg: DictConfig):
                     batch['mask'] = batch['mask'].to(device)
 
                     if cfg.task == 'uncond':
-                        # For unconditional generation we randomly sample the number of elements in the layout
-                        batch['length'] = torch.multinomial(length_dist, num_samples=len(batch['length']), 
-                                                            replacement=True) 
+                        batch['length'] = torch.multinomial(length_dist, num_samples=len(batch['length']),
+                                                            replacement=True)
                     if cfg.task == 'refinement':
                         batch['bbox'] += torch.normal(0, std=0.01, size=batch['bbox'].size()).to(device)
 
-                    geom_pred, cat_pred = model.inference(batch, task=cfg.task)
+                    if do_explain and not run_all:
+                        try:
+                            print("HERE!!!")
+                            geom_pred, cat_pred = model.inference(batch, task=cfg.task)
+                        except Exception as e:
+                            print(f"[XAI] Error: {e}. Falling back to standard inference.")
+                            geom_pred, cat_pred = model.inference(batch, task=cfg.task)
+                    else:
+                        # Standard Inference
+                        geom_pred, cat_pred = model.inference(batch, task=cfg.task)
+
+                    # --- Collect Results (Common Path) ---
                     bbox.append(geom_pred)
                     label.append(cat_pred)
                     pad_maski = torch.zeros(geom_pred.shape[:2], device=device, dtype=bool)
                     for k, L in enumerate(batch['length']):
                         pad_maski[k, :L] = True
                     pad_mask.append(pad_maski)
+
                     if not run_all:
                         break
                     if cfg.small:
                         break
+
                 bbox = convert_bbox(torch.cat(bbox), f'{cfg.data.format}->xywh')
                 ltrb_bbox, label, pad_mask = convert_bbox(bbox, 'xywh->ltrb'), torch.cat(label), torch.cat(pad_mask)
                 for bb, cat, mask in zip(bbox, label, pad_mask):
@@ -219,7 +207,6 @@ def main(cfg: DictConfig):
                 if not run_all:
                     print(results)
                 else:
-                    # Save the generated layouts
                     fname = f'{cfg.checkpoint.split("/")[-1][:-5]}_{cfg.task}_bbox.pt'
                     torch.save(results, f'./results/{fname}')
                     print(f'Results were saved at: ./results/{fname}')
@@ -229,25 +216,24 @@ def main(cfg: DictConfig):
                 bbox_for_miou = bbox_for_miou[:2000]
 
             if not run_all:
-                print(f"Number of samples used for evaluation: {len(label)} (Generated) and 1 (Test)")
-                print(f"[instance_index={instance_index}] Inference complete; skipping dataset-level metrics (FID/alignment/overlap).")
+                print(f"Number of samples used: {len(label)} (Generated)")
+                # Skip metrics for single instance
                 break
             else:
-                print(f"Number of samples used for evaluation: {len(label)} (Generated) and {len(label_test)} (Test)")
+                print(f"Number of samples: {len(label)} (Generated) / {len(label_test)} (Test)")
 
             feats_fake = fid_model.extract_features(ltrb_bbox, label, (~pad_mask))
             mu2 = np.mean(feats_fake.cpu().numpy(), axis=0)
             cov2 = np.cov(feats_fake.cpu().numpy(), rowvar=False)
-
             fid_score = calculate_frechet_distance(mu1, cov1, mu2, cov2)
             alignment_score = compute_alignment(bbox.cpu(), pad_mask.cpu())
             if 'RICO' in cfg.experiment.expname:
-                overlap_score= compute_overlap_ignore_bg(bbox.cpu(), label.cpu(), pad_mask.cpu())
+                overlap_score = compute_overlap_ignore_bg(bbox.cpu(), label.cpu(), pad_mask.cpu())
             else:
                 overlap_score = compute_overlap(bbox.cpu(), pad_mask.cpu())
             max_iou = compute_maximum_iou(gt, bbox_for_miou) if cfg.calc_miou else -1
-            print(f"FID Score: {fid_score:.4f} | Alignment: {100*alignment_score:.4f} | Overlap: {overlap_score:.4f} " \
-                  "| mIoU: " + (f"{max_iou:.4f}" if cfg.calc_miou else "[not calculated]"))
+            print(
+                f"FID: {fid_score:.4f} | Align: {100 * alignment_score:.4f} | Overlap: {overlap_score:.4f} | mIoU: {max_iou:.4f}")
 
             metrics['fid'].append(fid_score)
             metrics['alignment'].append(alignment_score)
@@ -256,10 +242,8 @@ def main(cfg: DictConfig):
 
     if cfg.visualize:
         os.makedirs('./vis', exist_ok=True)
-        # Limit to 20 samples or the actual number of generated samples (which is 1 for instance_index)
         for i in range(min(20, len(bbox))):
             L = torch.sum(pad_mask[i]).long()
-            # Use instance_index for filename if in single-mode, otherwise use sequence index
             fname = f'./vis/{instance_index}.png' if not run_all else f'./vis/{i}.png'
             draw_layout(bbox[i, :L], label[i, :L], num_colors=26, square=False).save(fname)
 
@@ -268,10 +252,8 @@ def main(cfg: DictConfig):
         alignment_score = np.array(metrics['alignment'])
         overlap_score = np.array(metrics['overlap'])
         miou_score = np.array(metrics['miou'])
-        print(f"Mean: FID Score: {fid_score.mean():.4f} (+/- {fid_score.std():.4f}) | " \
-                f"Alignment: {100*alignment_score.mean():.4f} (+/- {100*alignment_score.std():.4f}) | " \
-                f"Overlap: {overlap_score.mean():.4f} (+/- {overlap_score.std():.4f}) | " \
-                f"mIoU: {miou_score.mean():.4f} (+/- {miou_score.std():.4f})")
+        print(f"Mean: FID: {fid_score.mean():.4f} | Align: {100 * alignment_score.mean():.4f} | " \
+              f"Overlap: {overlap_score.mean():.4f} | mIoU: {miou_score.mean():.4f}")
 
 
 if __name__ == "__main__":

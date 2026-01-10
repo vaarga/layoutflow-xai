@@ -17,10 +17,13 @@ small: False
 device: 0
 calc_miou: False
 multirun: False
-visualize: False
+visualize: True
 logdir: ./wandb
 instance_index: -1
 seed: 42
+explain: True
+target_idx: 2
+target_attr: size
 
 hydra:  
   output_subdir: null  

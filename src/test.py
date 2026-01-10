@@ -81,8 +81,8 @@ def main(cfg: DictConfig):
         pin_memory = should_pin_memory()
 
         # Determine mode: -1 for all data, >= 0 for specific element index
-        element_index = getattr(cfg, "element_index", -1)
-        run_all = (element_index == -1)
+        instance_index = getattr(cfg, "instance_index", -1)
+        run_all = (instance_index == -1)
 
         # Load Test dataset
         val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order},
@@ -183,7 +183,7 @@ def main(cfg: DictConfig):
 
                     # If looking for a specific element index, skip others
                     if not run_all:
-                        if i != element_index:
+                        if i != instance_index:
                             continue
 
                     batch['type'] = batch['type'].to(device)
@@ -230,7 +230,7 @@ def main(cfg: DictConfig):
 
             if not run_all:
                 print(f"Number of samples used for evaluation: {len(label)} (Generated) and 1 (Test)")
-                print(f"[element_index={element_index}] Inference complete; skipping dataset-level metrics (FID/alignment/overlap).")
+                print(f"[instance_index={instance_index}] Inference complete; skipping dataset-level metrics (FID/alignment/overlap).")
                 break
             else:
                 print(f"Number of samples used for evaluation: {len(label)} (Generated) and {len(label_test)} (Test)")
@@ -247,17 +247,21 @@ def main(cfg: DictConfig):
                 overlap_score = compute_overlap(bbox.cpu(), pad_mask.cpu())
             max_iou = compute_maximum_iou(gt, bbox_for_miou) if cfg.calc_miou else -1
             print(f"FID Score: {fid_score:.4f} | Alignment: {100*alignment_score:.4f} | Overlap: {overlap_score:.4f} " \
-                  "| mIoU: " + (f"{max_iou:.4f}" if cfg.calc_miou else "[not calculated]")) 
-                                    
+                  "| mIoU: " + (f"{max_iou:.4f}" if cfg.calc_miou else "[not calculated]"))
+
             metrics['fid'].append(fid_score)
             metrics['alignment'].append(alignment_score)
             metrics['overlap'].append(overlap_score)
             metrics['miou'].append(max_iou)
 
     if cfg.visualize:
-        for i in range(20):
+        os.makedirs('./vis', exist_ok=True)
+        # Limit to 20 samples or the actual number of generated samples (which is 1 for instance_index)
+        for i in range(min(20, len(bbox))):
             L = torch.sum(pad_mask[i]).long()
-            draw_layout(bbox[i, :L], label[i, :L], num_colors=26, square=False).save(f'./vis/{i}.png')
+            # Use instance_index for filename if in single-mode, otherwise use sequence index
+            fname = f'./vis/{instance_index}.png' if not run_all else f'./vis/{i}.png'
+            draw_layout(bbox[i, :L], label[i, :L], num_colors=26, square=False).save(fname)
 
     if cfg.multirun:
         fid_score = np.array(metrics['fid'])

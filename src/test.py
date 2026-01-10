@@ -58,18 +58,23 @@ def should_pin_memory() -> bool:
 
 @hydra.main(version_base=None, config_path="../conf", config_name="test.yaml")
 def main(cfg: DictConfig):
-
     with torch.no_grad():
 
         device = torch.device(cfg.device)
         pin_memory = should_pin_memory()
-        only_first = cfg.only_first
+
+        # Determine mode: -1 for all data, >= 0 for specific element index
+        element_index = getattr(cfg, "element_index", -1)
+        run_all = (element_index == -1)
+
         # Load Test dataset
-        val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order}, 
+        val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order},
                                  shuffle=False, batch_size=1024, pin_memory=pin_memory)
-        test_loader = instantiate(cfg.dataset, dataset={'split': 'test', 'lex_order': cfg.lex_order}, 
-                                  shuffle=False, batch_size=1 if only_first else 1024, pin_memory=pin_memory)
-       
+
+        # If picking a specific element, we set batch_size=1 to iterate precisely to the index
+        test_loader = instantiate(cfg.dataset, dataset={'split': 'test', 'lex_order': cfg.lex_order},
+                                  shuffle=False, batch_size=1 if not run_all else 1024, pin_memory=pin_memory)
+
         # Load FID Model
         if 'RICO' in cfg.experiment.expname:
             fid_model = LayoutNet(25, 20)
@@ -112,7 +117,8 @@ def main(cfg: DictConfig):
             model = model.to(device)
             model.eval()
 
-        if not only_first:
+        # Sanity check metrics (only if processing all data)
+        if run_all:
             # Test and validation data
             if 'RICO' in cfg.experiment.expname:
                 # RICO dataloader only contains discretized bounding boxes, for exact calculation we load continuous data
@@ -154,17 +160,18 @@ def main(cfg: DictConfig):
                 bbox, ltrb_bbox, label, pad_mask, bbox_for_miou = load_generated_bbox_data(cfg, device)
             else:
                 bbox, label, pad_mask, bbox_for_miou = [], [], [], []
-                # Generation layouts using the model 
-                for batch in tqdm(test_loader, disable=only_first):
-                    batch['type'] = batch['type'].to(device)  
+                # Generation layouts using the model
+                # If specific index is requested, we disable tqdm to avoid clutter while skipping
+                for i, batch in enumerate(tqdm(test_loader, disable=(not run_all))):
+
+                    # If looking for a specific element index, skip others
+                    if not run_all:
+                        if i != element_index:
+                            continue
+
+                    batch['type'] = batch['type'].to(device)
                     batch['bbox'] = batch['bbox'].to(device)
                     batch['mask'] = batch['mask'].to(device)
-
-                    if only_first:
-                        batch['type'] = batch['type'][:1]
-                        batch['bbox'] = batch['bbox'][:1]
-                        batch['mask'] = batch['mask'][:1]
-                        batch['length'] = batch['length'][:1]
 
                     if cfg.task == 'uncond':
                         # For unconditional generation we randomly sample the number of elements in the layout
@@ -177,10 +184,10 @@ def main(cfg: DictConfig):
                     bbox.append(geom_pred)
                     label.append(cat_pred)
                     pad_maski = torch.zeros(geom_pred.shape[:2], device=device, dtype=bool)
-                    for i, L in enumerate(batch['length']):
-                        pad_maski[i, :L] = True
+                    for k, L in enumerate(batch['length']):
+                        pad_maski[k, :L] = True
                     pad_mask.append(pad_maski)
-                    if only_first:
+                    if not run_all:
                         break
                     if cfg.small:
                         break
@@ -192,7 +199,7 @@ def main(cfg: DictConfig):
 
                 results = torch.cat([bbox, label.unsqueeze(-1), pad_mask.unsqueeze(-1)], dim=-1)
 
-                if only_first:
+                if not run_all:
                     print(results)
                 else:
                     # Save the generated layouts
@@ -204,9 +211,9 @@ def main(cfg: DictConfig):
                 bbox, ltrb_bbox, label, pad_mask = bbox[:2000], ltrb_bbox[:2000], label[:2000], pad_mask[:2000]
                 bbox_for_miou = bbox_for_miou[:2000]
 
-            if only_first:
+            if not run_all:
                 print(f"Number of samples used for evaluation: {len(label)} (Generated) and 1 (Test)")
-                print("[only_first] Inference complete; skipping dataset-level metrics (FID/alignment/overlap).")
+                print(f"[element_index={element_index}] Inference complete; skipping dataset-level metrics (FID/alignment/overlap).")
                 break
             else:
                 print(f"Number of samples used for evaluation: {len(label)} (Generated) and {len(label_test)} (Test)")

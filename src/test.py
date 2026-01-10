@@ -13,7 +13,7 @@ from tqdm import tqdm
 from utils.fid_model import LayoutNet
 from utils.metrics import compute_alignment, compute_overlap, compute_overlap_ignore_bg, compute_maximum_iou
 from utils.utils import convert_bbox
-from utils.visualization import draw_layout
+from utils.visualization import draw_layout, visualize_trajectory
 
 rootutils.setup_root(__file__, indicator=".git", pythonpath=True)
 
@@ -174,11 +174,22 @@ def main(cfg: DictConfig):
 
                     if do_explain and not run_all:
                         try:
-                            print("HERE!!!")
-                            geom_pred, cat_pred = model.inference(batch, task=cfg.task)
+                            full_geom_pred, full_cat_pred, _ = model.inference(batch, task=cfg.task, full_traj=True)
+                            geom_pred, cat_pred = full_geom_pred[-1], full_cat_pred[-1]
+
+                            if cfg.visualize:
+                                visualize_trajectory(
+                                    cfg=cfg,
+                                    batch=batch,
+                                    full_geom_pred=full_geom_pred,
+                                    full_cat_pred=full_cat_pred,
+                                    instance_index=instance_index,
+                                )
+
                         except Exception as e:
                             print(f"[XAI] Error: {e}. Falling back to standard inference.")
                             geom_pred, cat_pred = model.inference(batch, task=cfg.task)
+
                     else:
                         # Standard Inference
                         geom_pred, cat_pred = model.inference(batch, task=cfg.task)

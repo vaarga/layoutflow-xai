@@ -4,6 +4,7 @@ lightning_logs/
 checkpoints/
 results/
 vis/
+vis_traj/
 datasets/
 *.pyc
 *.log

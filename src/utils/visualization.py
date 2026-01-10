@@ -1,8 +1,10 @@
-from typing import Any, Dict
-import torch
+import os
 import seaborn as sns
+import torch
 
 from PIL import Image, ImageDraw, ImageOps
+
+from utils.utils import convert_bbox
 
 def draw_layout(layout, features, num_colors=6, format='xywh', background_img=None, square=True):
     '''
@@ -57,3 +59,44 @@ def gen_colors(num_colors):
     palette = sns.color_palette("husl", num_colors)
     rgb_triples = [[int(x[0]*255), int(x[1]*255), int(x[2]*255)] for x in palette]
     return rgb_triples
+
+def visualize_trajectory(
+        cfg,
+        batch,
+        full_geom_pred,
+        full_cat_pred,
+        instance_index,
+        *,
+        out_root="./vis_traj",
+        num_colors=26,
+        square=False,
+) -> None:
+    """
+    Saves one rendered layout image per trajectory step (T) to disk.
+    Intended to be called only in the do_explain + not run_all path.
+    """
+    # Determine valid element count L (mirrors later usage with pad_mask)
+    if torch.is_tensor(batch["length"]):
+        L = int(batch["length"][0].item())
+    else:
+        L = int(batch["length"][0])
+
+    # Convert trajectory bboxes to xywh because draw_layout later uses xywh
+    traj_bbox_xywh = convert_bbox(full_geom_pred, f'{cfg.data.format}->xywh')
+
+    # Output directory per instance
+    out_dir = os.path.join(out_root, str(instance_index))
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Draw each trajectory step
+    T = traj_bbox_xywh.shape[0]
+    for t in range(T):
+        img = draw_layout(
+            traj_bbox_xywh[t, 0, :L].detach().cpu(),  # [L, 4]
+            full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),  # [L]
+            num_colors=num_colors,
+            square=square,
+        )
+        img.save(os.path.join(out_dir, f"step_{t:03d}.png"))
+
+    print(f"[XAI] Saved {T} trajectory frames to: {out_dir}")

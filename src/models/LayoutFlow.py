@@ -44,6 +44,9 @@ class LayoutFlow(BaseGenModel):
         self.fid_calc_every_n = fid_calc_every_n
         self.cond = cond
         self.attr_encoding = attr_encoding
+        self.target_idx = None  # int
+        self.target_attr = None  # str: "position" or "size" (also supports "x","y","w","h")
+        self.ig_steps = 32  # number of IG steps per timestamp (trade-off speed vs quality)
         if attr_encoding == 'AnalogBit':
             self.analog_bit = AnalogBit(num_cat)
         if fid_calc_every_n != 0: 
@@ -111,49 +114,240 @@ class LayoutFlow(BaseGenModel):
 
         return xt, ut
 
-    def inference(self, batch, full_traj=False, task=None):
-        # Sample initial layout x_0 
+    def inference(self, batch, full_traj=False, task=None, ig: bool = False):
+        """
+        If ig=True:
+          - returns exactly as full_traj=True plus influence tensor at the end:
+            (traj_geom, cat, cont_cat, influence)
+          - influence shape: [T, B, N, 3] with last dim = [pos, size, type]
+        """
+        # Sample initial layout x_0
         x0 = self.sampler.sample(batch)
+
         # Get conditioning mask
         cond_mask = self.get_cond_mask(batch)
+
         # Get conditional sample
         if self.attr_encoding == 'AnalogBit':
-            conv_type = self.analog_bit.encode(batch['type']) 
+            conv_type = self.analog_bit.encode(batch['type'])
         else:
-            conv_type = batch['type'].unsqueeze(-1) / (self.num_cat-1)
+            conv_type = batch['type'].unsqueeze(-1) / (self.num_cat - 1)
+
         ref = torch.cat([batch['bbox'], conv_type], dim=-1)
         cond_x = self.sampler.preprocess(ref)
         cond_x = batch['mask'] * cond_x + (~batch['mask']) * ref
-        
+
         # Create model wrapper for NeuralODE
         if task == 'condinf':
             vector_field = cond_wrapper(self, cond_x, cond_mask, batch=batch)
         else:
             vector_field = torch_wrapper(self, cond_x, cond_mask, cf_guidance=self.cf_guidance)
-        
+
         # Solve NeuralODE
         if self.ode_solver == 'euler':
             node = NeuralODE(vector_field, solver=self.ode_solver, sensitivity="adjoint")
         else:
             node = NeuralODE(vector_field, solver=self.ode_solver, sensitivity="adjoint", atol=1e-4, rtol=1e-4)
 
-        if task == 'refinement':
-            traj = node.trajectory(cond_x, t_span=torch.linspace(0.97, 1, self.inference_steps))
-        else:
-            traj = node.trajectory(x0, t_span=torch.linspace(0, 1, self.inference_steps))
-        traj = self.sampler.preprocess(traj, reverse=True)
-        
+        # IMPORTANT: we do not need gradients through the ODE solve for IG here.
+        # IG is computed on the backbone vector field per timestamp using the solved trajectory states.
+        with torch.no_grad():
+            if task == 'refinement':
+                t_span = torch.linspace(0.97, 1, self.inference_steps, device=x0.device)
+                traj_pre = node.trajectory(cond_x, t_span=t_span)
+            else:
+                t_span = torch.linspace(0, 1, self.inference_steps, device=x0.device)
+                traj_pre = node.trajectory(x0, t_span=t_span)
+
+        # traj_pre is in "preprocessed" space; decode to data space for outputs as before
+        traj = self.sampler.preprocess(traj_pre, reverse=True)
+
         # Post-processing and decoding of obtained trajectory
         if self.attr_encoding == 'AnalogBit':
-            cont_cat = self.analog_bit.decode(traj[...,self.geom_dim:])
+            cont_cat = self.analog_bit.decode(traj[..., self.geom_dim:])
         else:
-            cont_cat = traj[..., -1] * (self.num_cat-1) + 0.5
-        cont_cat = (1-cond_mask[:,:,-1]) * batch['type'] + cond_mask[:,:,-1] * cont_cat
-        cat = torch.clip(cont_cat.to(torch.int), 0, self.num_cat-1)
-        traj = (1-cond_mask[:,:,:self.geom_dim]) * batch['bbox'][None] + cond_mask[:,:,:self.geom_dim] * traj[...,:self.geom_dim]
-        self.input_cond = [(1-cond_mask[:,:,:self.geom_dim]) * batch['bbox'], (1-cond_mask[:,:,-1]) * batch['type']]
-        
+            cont_cat = traj[..., -1] * (self.num_cat - 1) + 0.5
+
+        cont_cat = (1 - cond_mask[:, :, -1]) * batch['type'] + cond_mask[:, :, -1] * cont_cat
+        cat = torch.clip(cont_cat.to(torch.int), 0, self.num_cat - 1)
+
+        traj = (1 - cond_mask[:, :, :self.geom_dim]) * batch['bbox'][None] + cond_mask[:, :, :self.geom_dim] * traj[..., :self.geom_dim]
+        self.input_cond = [
+            (1 - cond_mask[:, :, :self.geom_dim]) * batch['bbox'],
+            (1 - cond_mask[:, :, -1]) * batch['type']
+        ]
+
+        # --------------------------
+        # Integrated Gradients block
+        # --------------------------
+        if ig:
+            influence = self._compute_ig_influence_per_timestamp(
+                batch=batch,
+                traj_pre=traj_pre,
+                t_span=t_span,
+                cond_x=cond_x,
+                cond_mask=cond_mask,
+            )
+            # Requirement: if ig=True, return exactly like full_traj=True plus influence
+            return traj, cat, cont_cat, influence
+
+        # Default behavior
         return (traj, cat, cont_cat) if full_traj else (traj[-1], cat[-1])
+
+    def _resolve_ig_target(self, batch):
+        """
+        Target element index and attribute are expected to be provided via:
+          - self.target_idx, self.target_attr (recommended), set externally from cfg
+        Optionally supports batch['target_idx'], batch['target_attr'] if you prefer.
+        """
+        target_idx = getattr(self, "target_idx", None)
+        target_attr = getattr(self, "target_attr", None)
+
+        if target_idx is None and isinstance(batch, dict) and ("target_idx" in batch):
+            target_idx = int(batch["target_idx"])
+        if target_attr is None and isinstance(batch, dict) and ("target_attr" in batch):
+            target_attr = str(batch["target_attr"])
+
+        if target_idx is None:
+            raise ValueError(
+                "[LayoutFlow IG] target_idx not set. Set model.target_idx = cfg.target_idx "
+                "or add batch['target_idx']."
+            )
+        if target_attr is None:
+            raise ValueError(
+                "[LayoutFlow IG] target_attr not set. Set model.target_attr = cfg.target_attr "
+                "or add batch['target_attr']."
+            )
+
+        # Normalize naming
+        ta = target_attr.lower().strip()
+        if ta in ["pos", "position", "xy"]:
+            out_dims = (0, 1)
+        elif ta in ["size", "wh"]:
+            out_dims = (2, 3)
+        elif ta in ["x"]:
+            out_dims = (0,)
+        elif ta in ["y"]:
+            out_dims = (1,)
+        elif ta in ["w", "width"]:
+            out_dims = (2,)
+        elif ta in ["h", "height"]:
+            out_dims = (3,)
+        else:
+            raise ValueError(
+                f"[LayoutFlow IG] Unsupported target_attr='{target_attr}'. "
+                "Use: position|size|x|y|w|h."
+            )
+
+        return int(target_idx), out_dims
+
+    def _compute_ig_influence_per_timestamp(
+        self,
+        batch,
+        traj_pre: torch.Tensor,     # [T, B, N, D] in preprocessed space
+        t_span: torch.Tensor,       # [T]
+        cond_x: torch.Tensor,       # [B, N, D]
+        cond_mask: torch.Tensor,    # [B, N, D]
+    ) -> torch.Tensor:
+        """
+        Returns:
+          influence: [T, B, N, 3] where last dim is:
+            0: position influence (x+y)
+            1: size influence (w+h)
+            2: type influence (sum over type channels)
+        """
+        # Lazy import so normal inference does not require Captum
+        try:
+            from captum.attr import IntegratedGradients
+        except Exception as e:
+            raise ImportError(
+                "[LayoutFlow IG] captum is required for ig=True. "
+                "Install with: pip install captum"
+            ) from e
+
+        target_idx, out_dims = self._resolve_ig_target(batch)
+
+        # Cast masks to float for arithmetic (in case they are bool)
+        cond_mask_f = cond_mask.to(dtype=cond_x.dtype)
+
+        # Forward function for Captum IG:
+        # input: x_in (preprocessed layout state at timestamp)
+        # additional_forward_args: t_scalar
+        def forward_func(x_in: torch.Tensor, t_scalar: torch.Tensor) -> torch.Tensor:
+            # Ensure t is on the same device as x_in
+            if not torch.is_tensor(t_scalar):
+                t_scalar = torch.tensor(t_scalar, device=x_in.device, dtype=x_in.dtype)
+            else:
+                t_scalar = t_scalar.to(device=x_in.device, dtype=x_in.dtype)
+
+            B = x_in.shape[0]
+            if t_scalar.dim() == 0:
+                t_vec = t_scalar.repeat(B)
+            else:
+                # If user passes shape [1], expand; else assume already [B]
+                if t_scalar.numel() == 1:
+                    t_vec = t_scalar.view(1).repeat(B)
+                else:
+                    t_vec = t_scalar.view(-1)
+                    if t_vec.numel() != B:
+                        t_vec = t_vec[:1].repeat(B)
+
+            v = self(x_in, cond_mask, t_vec)  # vector field: [B, N, D]
+            # scalar output per sample
+            out = 0.0
+            for d in out_dims:
+                out = out + v[:, target_idx, d]
+            return out
+
+        ig = IntegratedGradients(forward_func)
+
+        # Determine valid element mask (to zero-out padding influences)
+        valid_elem_mask = None
+        if isinstance(batch, dict) and ("mask" in batch):
+            m = batch["mask"]
+            # mask is often [B, N, 1] bool
+            if m.dim() == 3:
+                m = m[..., 0]
+            valid_elem_mask = m.to(dtype=cond_x.dtype)  # [B, N]
+
+        influences = []
+
+        # We must re-enable gradients even if caller is inside torch.no_grad()
+        with torch.enable_grad():
+            for k in range(traj_pre.shape[0]):
+                # x_k is solver state (preprocessed)
+                x_k = traj_pre[k]  # [B, N, D]
+
+                # Build the *actual* input seen by the backbone (respect conditioning mask)
+                x_in = (1.0 - cond_mask_f) * cond_x + cond_mask_f * x_k
+
+                # IG baseline: zeros in preprocessed space (commonly corresponds to "neutral" after normalization)
+                baseline = torch.zeros_like(x_in)
+
+                # Captum call
+                attr = ig.attribute(
+                    inputs=x_in,
+                    baselines=baseline,
+                    additional_forward_args=(t_span[k],),
+                    n_steps=int(getattr(self, "ig_steps", 32)),
+                )  # [B, N, D]
+
+                # Aggregate per element i into 3 scalars
+                # (Assumes first 4 dims are x,y,w,h; remaining are type encoding channels.)
+                pos_inf = attr[..., 0] + attr[..., 1]                       # [B, N]
+                size_inf = attr[..., 2] + attr[..., 3]                      # [B, N]
+                type_inf = attr[..., self.geom_dim:].sum(dim=-1)            # [B, N]
+
+                infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1) # [B, N, 3]
+
+                if valid_elem_mask is not None:
+                    infl_k = infl_k * valid_elem_mask.unsqueeze(-1)
+
+                influences.append(infl_k)
+
+        influence = torch.stack(influences, dim=0)  # [T, B, N, 3]
+        return influence
+
 
 
 class torch_wrapper(torch.nn.Module):

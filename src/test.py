@@ -174,15 +174,28 @@ def main(cfg: DictConfig):
 
                     if do_explain and not run_all:
                         try:
-                            full_geom_pred, full_cat_pred, _ = model.inference(batch, task=cfg.task, full_traj=True)
-                            geom_pred, cat_pred = full_geom_pred[-1], full_cat_pred[-1]
+                            # Provide IG target settings to the model (from cfg)
+                            model.target_idx = int(cfg.target_idx)
+                            model.target_attr = str(cfg.target_attr)
+
+                            # Run inference with integrated gradients
+                            geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch, task=cfg.task,
+                                                                                            ig=True)
+
+                            print("geom_traj:", geom_traj.shape)  # [T, B, N, 4]
+                            print("cat_traj:", cat_traj.shape)  # [T, B, N]
+                            print("influence:", influence.shape)  # [T, B, N, 3]
+
+                            # Keep pipeline compatible: use final timestep for generated layout
+                            geom_pred = geom_traj[-1]
+                            cat_pred = cat_traj[-1]
 
                             if cfg.visualize:
                                 visualize_trajectory(
                                     cfg=cfg,
                                     batch=batch,
-                                    full_geom_pred=full_geom_pred,
-                                    full_cat_pred=full_cat_pred,
+                                    full_geom_pred=geom_traj,
+                                    full_cat_pred=cat_traj,
                                     instance_index=instance_index,
                                 )
 

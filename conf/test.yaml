@@ -19,10 +19,10 @@ calc_miou: False
 multirun: False
 visualize: True
 logdir: ./wandb
-instance_index: 10
+instance_index: 4
 seed: 42
 explain: True
-target_idx: 2
+target_idx: 7
 target_attr: size
 
 hydra:  

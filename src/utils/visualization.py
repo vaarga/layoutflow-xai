@@ -1,6 +1,7 @@
 import os
 import seaborn as sns
 import torch
+import math
 
 from PIL import Image, ImageDraw, ImageOps
 
@@ -50,6 +51,202 @@ def draw_layout(layout, features, num_colors=6, format='xywh', background_img=No
     img = ImageOps.expand(img, border=2)
     return img
 
+
+def draw_xai_layout(
+    layout,
+    features,
+    num_colors=6,
+    format="xywh",
+    background_img=None,
+    square=True,
+    influence=None,      # [L, 3] = [pos, size, type] raw IG (can be negative)
+    target_idx=None,     # int
+    *,
+    border_width=2,
+    point_radius=3,
+    star_outer_radius=7,
+):
+    """
+    layout (S, 4): bbox in (0,1)
+    features (S,): category ids used only for base color (no text shown)
+
+    If influence is provided:
+      - influence is converted to per-category percentages over all elements (per timestamp)
+      - marker opacity encodes position influence %
+      - border opacity encodes size influence %
+      - fill opacity encodes type influence %
+      - target_idx gets a STAR marker; others get DOT marker
+    """
+    colors = gen_colors(num_colors)
+
+    # Create background image
+    if background_img:
+        img = background_img
+    else:
+        if square:
+            img = Image.new("RGB", (256, 256), color=(255, 255, 255))
+        else:
+            img = Image.new("RGB", (256, int(4 / 3 * 256)), color=(255, 255, 255))
+
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    # Convert inputs to CPU tensors (safe for PIL drawing)
+    if torch.is_tensor(layout):
+        layout_t = layout.detach().cpu()
+    else:
+        layout_t = torch.tensor(layout)
+
+    if torch.is_tensor(features):
+        feats_t = features.detach().cpu()
+    else:
+        feats_t = torch.tensor(features)
+
+    layout_t = torch.clip(layout_t, 0, 1)
+
+    # Prepare influence percentages if provided
+    influence_pct = None
+    if influence is not None:
+        if torch.is_tensor(influence):
+            infl_t = influence.detach().cpu()
+        else:
+            infl_t = torch.tensor(influence)
+
+        # Expect shape [S, 3]
+        if infl_t.dim() != 2 or infl_t.size(-1) != 3:
+            raise ValueError(f"influence must have shape [S,3], got {tuple(infl_t.shape)}")
+
+        # Influence power = magnitude (so negatives do not create negative opacity)
+        power = infl_t.abs()  # does NOT modify original tensor
+
+        # Per-category normalization over elements (sum to 1 per column)
+        denom = power.sum(dim=0, keepdim=True)  # [1,3]
+        influence_pct = torch.where(
+            denom > 0,
+            power / denom,
+            torch.zeros_like(power),
+        )  # [S,3] in [0,1]
+
+    # Convert layout to pixel boxes
+    if format == "ltwh":
+        box = torch.stack(
+            [layout_t[:, 0], layout_t[:, 1], layout_t[:, 2] + layout_t[:, 0], layout_t[:, 3] + layout_t[:, 1]],
+            dim=1,
+        )
+    elif format == "xywh":
+        box = torch.stack(
+            [
+                layout_t[:, 0] - layout_t[:, 2] / 2,
+                layout_t[:, 1] - layout_t[:, 3] / 2,
+                layout_t[:, 0] + layout_t[:, 2] / 2,
+                layout_t[:, 1] + layout_t[:, 3] / 2,
+            ],
+            dim=1,
+        )
+    elif format == "ltrb":
+        box = torch.stack(
+            [
+                layout_t[:, 0],
+                layout_t[:, 1],
+                torch.maximum(layout_t[:, 0], layout_t[:, 2]),
+                torch.maximum(layout_t[:, 1], layout_t[:, 3]),
+            ],
+            dim=1,
+        )
+    else:
+        raise ValueError(f"Error: {format} format not supported.")
+
+    box = 255 * torch.clamp(box, 0, 1)
+
+    # Validate target_idx
+    S = int(layout_t.shape[0])
+    if target_idx is not None:
+        try:
+            target_idx = int(target_idx)
+        except Exception:
+            target_idx = None
+        if target_idx is not None and not (0 <= target_idx < S):
+            target_idx = None
+
+    def star_polygon(cx, cy, r_outer, r_inner, num_points=5):
+        pts = []
+        angle = -math.pi / 2  # start upwards
+        step = math.pi / num_points
+        for k in range(num_points * 2):
+            r = r_outer if (k % 2 == 0) else r_inner
+            x = cx + r * math.cos(angle)
+            y = cy + r * math.sin(angle)
+            pts.append((x, y))
+            angle += step
+        return pts
+
+    # Draw elements
+    for i in range(S):
+        # Category color (kept from your original function)
+        cat_raw = feats_t[i].item()
+        cat = int(cat_raw) - 1  # keep your original convention
+        if cat < 0:
+            continue
+
+        col = colors[cat] if 0 <= cat < len(colors) else [0, 0, 0]
+
+        x1, y1, x2, y2 = box[i].tolist()
+
+        # Handle non-square aspect
+        if not square:
+            y1 = (4 / 3) * y1
+            y2 = (4 / 3) * y2
+
+        # Influence-driven alphas
+        if influence_pct is None:
+            # Original behavior (backward compatible)
+            outline_rgba = tuple(col) + (200,)
+            fill_rgba = tuple(col) + (64,)
+            marker_alpha = None
+        else:
+            pos_p = float(influence_pct[i, 0].item())   # [0,1]
+            size_p = float(influence_pct[i, 1].item())  # [0,1]
+            type_p = float(influence_pct[i, 2].item())  # [0,1]
+
+            marker_alpha = int(round(pos_p * 255))
+            border_alpha = int(round(size_p * 255))
+            fill_alpha = int(round(type_p * 255))
+
+            # Background encodes TYPE influence (opacity)
+            fill_rgba = tuple(col) + (fill_alpha,)
+
+            # Border encodes SIZE influence (opacity)
+            outline_rgba = (0, 0, 0, border_alpha)
+
+        # Draw background (type influence)
+        draw.rectangle([x1, y1, x2, y2], fill=fill_rgba)
+
+        # Draw border (size influence)
+        draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(border_width))
+
+        # Draw center marker (position influence)
+        if marker_alpha is not None:
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+
+            if target_idx is not None and i == target_idx:
+                # STAR
+                pts = star_polygon(
+                    cx, cy,
+                    r_outer=float(star_outer_radius),
+                    r_inner=float(star_outer_radius) * 0.5,
+                    num_points=5,
+                )
+                draw.polygon(pts, fill=(0, 0, 0, marker_alpha))
+            else:
+                # POINT
+                r = float(point_radius)
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 0, 0, marker_alpha))
+
+    # Keep your border expansion, but make it white so it doesn’t add “extra visuals”
+    img = ImageOps.expand(img, border=2, fill=(255, 255, 255))
+    return img
+
+
 def gen_colors(num_colors):
     """
     Generate uniformly distributed `num_colors` colors
@@ -66,6 +263,7 @@ def visualize_trajectory(
         full_geom_pred,
         full_cat_pred,
         instance_index,
+        influence,
         *,
         out_root="./vis_traj",
         num_colors=26,
@@ -91,11 +289,14 @@ def visualize_trajectory(
     # Draw each trajectory step
     T = traj_bbox_xywh.shape[0]
     for t in range(T):
-        img = draw_layout(
+        img = draw_xai_layout(
             traj_bbox_xywh[t, 0, :L].detach().cpu(),  # [L, 4]
             full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),  # [L]
             num_colors=num_colors,
             square=square,
+            format='xywh',
+            influence=influence[t, 0, :L].detach().cpu(),
+            target_idx=getattr(cfg, "target_idx", -1),
         )
         img.save(os.path.join(out_dir, f"step_{t:03d}.png"))
 

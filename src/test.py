@@ -197,6 +197,7 @@ def main(cfg: DictConfig):
                                     full_geom_pred=geom_traj,
                                     full_cat_pred=cat_traj,
                                     instance_index=instance_index,
+                                    influence=influence,
                                 )
 
                         except Exception as e:

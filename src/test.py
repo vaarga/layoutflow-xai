@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Optional, Tuple
+import random
+import os
 from omegaconf import DictConfig, OmegaConf
 import hydra
 from hydra.utils import instantiate, call
@@ -15,6 +16,19 @@ from utils.utils import convert_bbox
 from utils.visualization import draw_layout
 
 rootutils.setup_root(__file__, indicator=".git", pythonpath=True)
+
+def set_seed(seed: int):
+    """Sets the seed for reproducibility across random, numpy, and torch."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # Safe to call even if 1 GPU
+    # Ensure deterministic behavior for cuDNN (may impact performance slightly)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    print(f"Global seed set to: {seed}")
 
 def get_data(dataloader, cfg):
     bbox = []
@@ -58,6 +72,9 @@ def should_pin_memory() -> bool:
 
 @hydra.main(version_base=None, config_path="../conf", config_name="test.yaml")
 def main(cfg: DictConfig):
+    seed = getattr(cfg, "seed", 42)
+    set_seed(seed)
+
     with torch.no_grad():
 
         device = torch.device(cfg.device)

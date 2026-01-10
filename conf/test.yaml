@@ -19,7 +19,8 @@ calc_miou: False
 multirun: False
 visualize: False
 logdir: ./wandb
-element_index: -1
+element_index: 10
+seed: 42
 
 hydra:  
   output_subdir: null  

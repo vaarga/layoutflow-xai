@@ -234,9 +234,7 @@ def main(cfg: DictConfig):
 
                 results = torch.cat([bbox, label.unsqueeze(-1), pad_mask.unsqueeze(-1)], dim=-1)
 
-                if not run_all:
-                    print(results)
-                else:
+                if run_all:
                     fname = f'{cfg.checkpoint.split("/")[-1][:-5]}_{cfg.task}_bbox.pt'
                     torch.save(results, f'./results/{fname}')
                     print(f'Results were saved at: ./results/{fname}')

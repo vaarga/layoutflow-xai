@@ -46,7 +46,7 @@ class LayoutFlow(BaseGenModel):
         self.attr_encoding = attr_encoding
         self.target_idx = None  # int
         self.target_attr = None  # str: "position" or "size" (also supports "x","y","w","h")
-        self.ig_steps = 32  # number of IG steps per timestamp (trade-off speed vs quality)
+        self.ig_steps = 300  # number of IG steps per timestamp (trade-off speed vs quality)
         if attr_encoding == 'AnalogBit':
             self.analog_bit = AnalogBit(num_cat)
         if fid_calc_every_n != 0: 

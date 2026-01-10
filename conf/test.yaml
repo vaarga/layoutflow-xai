@@ -19,7 +19,7 @@ calc_miou: False
 multirun: False
 visualize: True
 logdir: ./wandb
-instance_idx: 17
+instance_idx: 8
 seed: 42
 explain: True
 target_idx: 0

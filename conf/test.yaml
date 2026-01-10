@@ -19,11 +19,12 @@ calc_miou: False
 multirun: False
 visualize: True
 logdir: ./wandb
-instance_index: 4
+instance_idx: 17
 seed: 42
 explain: True
-target_idx: 7
+target_idx: 0
 target_attr: size
+dataset_name: ${hydra:runtime.choices.dataset}
 
 hydra:  
   output_subdir: null  

@@ -262,15 +262,17 @@ def visualize_trajectory(
         batch,
         full_geom_pred,
         full_cat_pred,
-        instance_index,
+        instance_idx,
         influence,
+        target_idx,
+        target_attr,
         *,
         out_root="./vis_traj",
         num_colors=26,
         square=False,
 ) -> None:
     """
-    Saves one rendered layout image per trajectory step (T) to disk.
+    Saves one animated GIF per instance showing the trajectory over T steps.
     Intended to be called only in the do_explain + not run_all path.
     """
     # Determine valid element count L (mirrors later usage with pad_mask)
@@ -279,25 +281,70 @@ def visualize_trajectory(
     else:
         L = int(batch["length"][0])
 
-    # Convert trajectory bboxes to xywh because draw_layout later uses xywh
+    # Convert trajectory bboxes to xywh because draw_xai_layout uses xywh
     traj_bbox_xywh = convert_bbox(full_geom_pred, f'{cfg.data.format}->xywh')
 
     # Output directory per instance
-    out_dir = os.path.join(out_root, str(instance_index))
+    out_dir = os.path.join(out_root, cfg.dataset_name, cfg.task, str(instance_idx))
     os.makedirs(out_dir, exist_ok=True)
 
-    # Draw each trajectory step
-    T = traj_bbox_xywh.shape[0]
+    fps = 5.0
+    duration_ms = int(round(1000.0 / fps))
+
+    # Render frames
+    frames = []
+    frames_xai = []
+    T = int(traj_bbox_xywh.shape[0])
     for t in range(T):
-        img = draw_xai_layout(
-            traj_bbox_xywh[t, 0, :L].detach().cpu(),  # [L, 4]
-            full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),  # [L]
+        img = draw_layout(
+            traj_bbox_xywh[t, 0, :L].detach().cpu(),
+            full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),
             num_colors=num_colors,
             square=square,
-            format='xywh',
-            influence=influence[t, 0, :L].detach().cpu(),
-            target_idx=getattr(cfg, "target_idx", -1),
         )
-        img.save(os.path.join(out_dir, f"step_{t:03d}.png"))
+        img_xai = draw_xai_layout(
+            traj_bbox_xywh[t, 0, :L].detach().cpu(),
+            full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),
+            num_colors=num_colors,
+            square=square,
+            format="xywh",
+            influence=influence[t, 0, :L].detach().cpu(),
+            target_idx=target_idx,
+        )
 
-    print(f"[XAI] Saved {T} trajectory frames to: {out_dir}")
+        # Ensure GIF-compatible mode
+        # (RGBA is okay, but many viewers handle palette GIFs better)
+        frames.append(img.convert("P", palette=Image.ADAPTIVE))
+        frames_xai.append(img_xai.convert("P", palette=Image.ADAPTIVE))
+
+    if len(frames) != 0:
+        gif_path = os.path.join(out_dir, f"default.gif")
+
+        # Save as looping GIF
+        frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=duration_ms,  # ms per frame
+            loop=0,  # loop forever
+            disposal=2,  # restore to background between frames (reduces artifacts)
+            optimize=False,
+        )
+
+        print(f"[NORMAL] Saved trajectory GIF with {T} frames to: {gif_path}")
+
+    if len(frames_xai) != 0:
+        gif_path = os.path.join(out_dir, f"{target_idx}_{target_attr}.gif")
+
+        # Save as looping GIF
+        frames_xai[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames_xai[1:],
+            duration=duration_ms,  # ms per frame
+            loop=0,  # loop forever
+            disposal=2,  # restore to background between frames (reduces artifacts)
+            optimize=False,
+        )
+
+        print(f"[XAI] Saved trajectory GIF with {T} frames to: {gif_path}")

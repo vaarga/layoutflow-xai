@@ -75,8 +75,8 @@ def main(cfg: DictConfig):
     with torch.no_grad():
         device = torch.device(cfg.device)
         pin_memory = should_pin_memory()
-        instance_index = getattr(cfg, "instance_index", -1)
-        run_all = (instance_index == -1)
+        instance_idx = getattr(cfg, "instance_idx", -1)
+        run_all = (instance_idx == -1)
         do_explain = getattr(cfg, "explain", False)
 
         val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order},
@@ -159,7 +159,7 @@ def main(cfg: DictConfig):
                 # --- GENERATION LOOP ---
                 for i, batch in enumerate(tqdm(test_loader, disable=(not run_all))):
                     if not run_all:
-                        if i != instance_index:
+                        if i != instance_idx:
                             continue
 
                     batch['type'] = batch['type'].to(device)
@@ -175,8 +175,11 @@ def main(cfg: DictConfig):
                     if do_explain and not run_all:
                         try:
                             # Provide IG target settings to the model (from cfg)
-                            model.target_idx = int(cfg.target_idx)
-                            model.target_attr = str(cfg.target_attr)
+                            target_idx = int(getattr(cfg, "target_idx", 0))
+                            target_attr = str(getattr(cfg, "target_attr", "position"))
+
+                            model.target_idx = target_idx
+                            model.target_attr = target_attr
 
                             # Run inference with integrated gradients
                             geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch, task=cfg.task,
@@ -196,8 +199,10 @@ def main(cfg: DictConfig):
                                     batch=batch,
                                     full_geom_pred=geom_traj,
                                     full_cat_pred=cat_traj,
-                                    instance_index=instance_index,
+                                    instance_idx=instance_idx,
                                     influence=influence,
+                                    target_idx=target_idx,
+                                    target_attr=target_attr,
                                 )
 
                         except Exception as e:
@@ -269,7 +274,7 @@ def main(cfg: DictConfig):
         os.makedirs('./vis', exist_ok=True)
         for i in range(min(20, len(bbox))):
             L = torch.sum(pad_mask[i]).long()
-            fname = f'./vis/{instance_index}.png' if not run_all else f'./vis/{i}.png'
+            fname = f'./vis/{instance_idx}.png' if not run_all else f'./vis/{i}.png'
             draw_layout(bbox[i, :L], label[i, :L], num_colors=26, square=False).save(fname)
 
     if cfg.multirun:

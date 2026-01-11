@@ -17,6 +17,8 @@ from utils.visualization import draw_layout, visualize_trajectory
 
 rootutils.setup_root(__file__, indicator=".git", pythonpath=True)
 
+torch.set_printoptions(sci_mode=False)
+
 def set_seed(seed: int):
     """Sets the seed for reproducibility across random, numpy, and torch."""
     random.seed(seed)

@@ -311,6 +311,9 @@ class LayoutFlow(BaseGenModel):
             valid_elem_mask = m.to(dtype=cond_x.dtype)  # [B, N]
 
         influences = []
+        delta_arr = np.zeros(100)
+        diff_arr = np.zeros(100)
+        rel_delta_arr = np.zeros(100)
 
         # We must re-enable gradients even if caller is inside torch.no_grad()
         with torch.enable_grad():
@@ -321,16 +324,28 @@ class LayoutFlow(BaseGenModel):
                 # Build the *actual* input seen by the backbone (respect conditioning mask)
                 x_in = (1.0 - cond_mask_f) * cond_x + cond_mask_f * x_k
 
-                # IG baseline: zeros in preprocessed space (commonly corresponds to "neutral" after normalization)
-                baseline = torch.zeros_like(x_in)
+                # baseline_free could be zeros, or better: a dataset-mean "null element" in preprocessed space
+                baseline_free = torch.zeros_like(x_in)
+                baseline = (1.0 - cond_mask_f) * x_in + cond_mask_f * baseline_free
 
                 # Captum call
-                attr = ig.attribute(
+                attr, delta = ig.attribute(
                     inputs=x_in,
                     baselines=baseline,
                     additional_forward_args=(t_span[k],),
                     n_steps=int(getattr(self, "ig_steps", 32)),
+                    return_convergence_delta=True
                 )  # [B, N, D]
+
+                # Compute F(x) - F(baseline) for the same forward_func definition
+                Fx = forward_func(x_in, t_span[k]).detach()
+                Fb = forward_func(baseline, t_span[k]).detach()
+                diff = (Fx - Fb).abs()
+                rel_delta = delta.abs() / (diff + 1e-6)
+
+                delta_arr[k] = delta.abs()
+                diff_arr[k] = diff
+                rel_delta_arr[k] = rel_delta
 
                 # Aggregate per element i into 3 scalars
                 # (Assumes first 4 dims are x,y,w,h; remaining are type encoding channels.)
@@ -344,6 +359,10 @@ class LayoutFlow(BaseGenModel):
                     infl_k = infl_k * valid_elem_mask.unsqueeze(-1)
 
                 influences.append(infl_k)
+
+        print("delta mean:", delta_arr.mean())
+        print("diff mean:", diff_arr.mean())
+        print("rel_delta mean:", rel_delta_arr.mean())
 
         influence = torch.stack(influences, dim=0)  # [T, B, N, 3]
         return influence

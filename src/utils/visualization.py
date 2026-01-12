@@ -2,10 +2,10 @@ import os
 import seaborn as sns
 import torch
 import math
-
 from PIL import Image, ImageDraw, ImageOps
 
 from utils.utils import convert_bbox
+
 
 def draw_layout(layout, features, num_colors=6, format='xywh', background_img=None, square=True):
     '''
@@ -49,6 +49,161 @@ def draw_layout(layout, features, num_colors=6, format='xywh', background_img=No
 
     # Add border around image
     img = ImageOps.expand(img, border=2)
+    return img
+
+
+def draw_xai_layout_xy_vectors(
+    layout,
+    features,
+    num_colors=6,
+    format="xywh",
+    background_img=None,
+    square=True,
+    influence_xy=None,   # [L, 2] = [dx_contrib, dy_contrib] (SIGNED)
+    target_idx=None,
+    *,
+    border_width=2,
+    arrow_width=2,
+    arrow_max_len_px=40,     # longest arrow length (pixels)
+    arrow_head_len_px=8,
+    arrow_head_angle_deg=25,
+    skip_target_arrow=True,
+    global_max_mag=None,     # float; if provided -> consistent scaling across frames
+):
+    """
+    Draws layout rectangles (same coloring convention), then draws one arrow per element i:
+      vector_i = (influence_xy[i,0], influence_xy[i,1])
+    Arrow direction: sign of (dx,dy)
+    Arrow length: magnitude sqrt(dx^2 + dy^2) scaled to arrow_max_len_px.
+    """
+    colors = gen_colors(num_colors)
+
+    # Background
+    if background_img:
+        img = background_img
+    else:
+        img = Image.new("RGB", (256, 256), color=(255, 255, 255)) if square else Image.new("RGB", (256, int(4/3*256)), color=(255, 255, 255))
+
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    # Tensors -> CPU
+    layout_t = layout.detach().cpu() if torch.is_tensor(layout) else torch.tensor(layout)
+    feats_t  = features.detach().cpu() if torch.is_tensor(features) else torch.tensor(features)
+    layout_t = torch.clip(layout_t, 0, 1)
+
+    # Influence
+    if influence_xy is not None:
+        infl_t = influence_xy.detach().cpu() if torch.is_tensor(influence_xy) else torch.tensor(influence_xy)
+        if infl_t.dim() != 2 or infl_t.size(-1) != 2:
+            raise ValueError(f"influence_xy must have shape [S,2], got {tuple(infl_t.shape)}")
+    else:
+        infl_t = None
+
+    # Boxes
+    if format == "ltwh":
+        box = torch.stack([layout_t[:,0], layout_t[:,1], layout_t[:,2]+layout_t[:,0], layout_t[:,3]+layout_t[:,1]], dim=1)
+    elif format == "xywh":
+        box = torch.stack([layout_t[:,0]-layout_t[:,2]/2, layout_t[:,1]-layout_t[:,3]/2, layout_t[:,0]+layout_t[:,2]/2, layout_t[:,1]+layout_t[:,3]/2], dim=1)
+    elif format == "ltrb":
+        box = torch.stack([layout_t[:,0], layout_t[:,1], torch.maximum(layout_t[:,0], layout_t[:,2]), torch.maximum(layout_t[:,1], layout_t[:,3])], dim=1)
+    else:
+        raise ValueError(f"Error: {format} format not supported.")
+
+    box = 255 * torch.clamp(box, 0, 1)
+
+    S = int(layout_t.shape[0])
+    if target_idx is not None:
+        try:
+            target_idx = int(target_idx)
+        except Exception:
+            target_idx = None
+        if target_idx is not None and not (0 <= target_idx < S):
+            target_idx = None
+
+    # Draw rectangles first (base layout)
+    for i in range(S):
+        cat_raw = feats_t[i].item()
+        cat = int(cat_raw) - 1
+        if cat < 0:
+            continue
+        col = colors[cat] if 0 <= cat < len(colors) else [0, 0, 0]
+
+        x1, y1, x2, y2 = box[i].tolist()
+        if not square:
+            y1 = (4/3) * y1
+            y2 = (4/3) * y2
+
+        draw.rectangle([x1, y1, x2, y2], fill=tuple(col) + (64,))
+        draw.rectangle([x1, y1, x2, y2], outline=tuple(col) + (200,), width=int(border_width))
+
+    # Draw arrows
+    if infl_t is not None and S > 0:
+        dx = infl_t[:, 0]
+        dy = infl_t[:, 1]
+        mag = torch.sqrt(dx*dx + dy*dy)
+
+        # scaling (use global max if provided for consistency across frames)
+        max_mag = float(global_max_mag) if (global_max_mag is not None) else float(mag.max().item() if mag.numel() else 0.0)
+        if max_mag <= 1e-12:
+            max_mag = 1.0
+        scale = float(arrow_max_len_px) / max_mag
+
+        head_angle = math.radians(float(arrow_head_angle_deg))
+
+        for i in range(S):
+            if skip_target_arrow and (target_idx is not None) and (i == target_idx):
+                continue
+
+            m = float(mag[i].item())
+            if m <= 1e-12:
+                continue
+
+            # alpha by relative magnitude
+            a = int(round(255.0 * min(1.0, m / max_mag)))
+            a = max(40, a)  # keep visible
+
+            # Arrow from element center
+            x1, y1, x2, y2 = box[i].tolist()
+            if not square:
+                y1 = (4/3) * y1
+                y2 = (4/3) * y2
+
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+
+            vx = float(dx[i].item()) * scale
+            vy = float(dy[i].item()) * scale
+
+            ex = cx + vx
+            ey = cy + vy
+
+            # main shaft
+            draw.line([cx, cy, ex, ey], fill=(0, 0, 0, a), width=int(arrow_width))
+
+            # arrow head (two lines)
+            ang = math.atan2(vy, vx)
+            hl = float(arrow_head_len_px)
+
+            xh1 = ex - hl * math.cos(ang - head_angle)
+            yh1 = ey - hl * math.sin(ang - head_angle)
+            xh2 = ex - hl * math.cos(ang + head_angle)
+            yh2 = ey - hl * math.sin(ang + head_angle)
+
+            draw.line([ex, ey, xh1, yh1], fill=(0, 0, 0, a), width=int(arrow_width))
+            draw.line([ex, ey, xh2, yh2], fill=(0, 0, 0, a), width=int(arrow_width))
+
+    # Mark target with a star-like marker (simple)
+    if target_idx is not None and 0 <= target_idx < S:
+        x1, y1, x2, y2 = box[target_idx].tolist()
+        if not square:
+            y1 = (4/3) * y1
+            y2 = (4/3) * y2
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        r = 6.0
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 255), width=2)
+
+    img = ImageOps.expand(img, border=2, fill=(255, 255, 255))
     return img
 
 
@@ -257,6 +412,7 @@ def gen_colors(num_colors):
     rgb_triples = [[int(x[0]*255), int(x[1]*255), int(x[2]*255)] for x in palette]
     return rgb_triples
 
+
 def visualize_trajectory(
         cfg,
         batch,
@@ -296,6 +452,17 @@ def visualize_trajectory(
     frames = []
     frames_xai = []
     T = int(traj_bbox_xywh.shape[0])
+
+    max_mag_global = None
+    if ig_return_xy:
+        infl_xy = influence[:, 0, :L].detach().cpu()  # [T, L, 2]
+        mags = torch.sqrt(infl_xy[..., 0] ** 2 + infl_xy[..., 1] ** 2).reshape(-1)
+        if mags.numel():
+            max_mag_global = float(torch.quantile(mags, 0.95).item())  # robust scaling
+            max_mag_global = max(max_mag_global, 1e-6)
+        else:
+            max_mag_global = 1.0
+
     for t in range(T):
         img = draw_layout(
             traj_bbox_xywh[t, 0, :L].detach().cpu(),
@@ -303,15 +470,28 @@ def visualize_trajectory(
             num_colors=num_colors,
             square=square,
         )
-        img_xai = draw_xai_layout(
-            traj_bbox_xywh[t, 0, :L].detach().cpu(),
-            full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),
-            num_colors=num_colors,
-            square=square,
-            format="xywh",
-            influence=influence[t, 0, :L].detach().cpu(),
-            target_idx=target_idx,
-        )
+        if ig_return_xy:
+            img_xai = draw_xai_layout_xy_vectors(
+                traj_bbox_xywh[t, 0, :L].detach().cpu(),
+                full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),
+                num_colors=num_colors,
+                square=square,
+                format="xywh",
+                influence_xy=influence[t, 0, :L].detach().cpu(),  # [L,2]
+                target_idx=target_idx,
+                global_max_mag=max_mag_global,
+                skip_target_arrow=False,  # <-- ADD THIS
+            )
+        else:
+            img_xai = draw_xai_layout(
+                traj_bbox_xywh[t, 0, :L].detach().cpu(),
+                full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),
+                num_colors=num_colors,
+                square=square,
+                format="xywh",
+                influence=influence[t, 0, :L].detach().cpu(),  # [L,3]
+                target_idx=target_idx,
+            )
 
         # Ensure GIF-compatible mode
         # (RGBA is okay, but many viewers handle palette GIFs better)

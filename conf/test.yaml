@@ -23,8 +23,8 @@ instance_idx: 4
 seed: 42
 explain: True
 target_idx: 6
-target_attr: geometry
-ig_return_xy: False
+target_attr: position
+ig_return_xy: True
 dataset_name: ${hydra:runtime.choices.dataset}
 
 hydra:  

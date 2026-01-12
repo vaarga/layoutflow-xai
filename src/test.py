@@ -184,8 +184,10 @@ def main(cfg: DictConfig):
                             model.target_attr = target_attr
 
                             # Run inference with integrated gradients
-                            geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch, task=cfg.task,
-                                                                                            ig=True)
+                            geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch,
+                                                                                            task=cfg.task,
+                                                                                            ig=True,
+                                                                                            dataset_name=cfg.dataset_name)
 
                             print("geom_traj:", geom_traj.shape)  # [T, B, N, 4]
                             print("cat_traj:", cat_traj.shape)  # [T, B, N]

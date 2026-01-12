@@ -1,13 +1,22 @@
-from typing import Any
+from typing import Text
 import torch
 import torch.nn as nn
 import numpy as np
+import json
+import os
 from torchcfm import ConditionalFlowMatcher
 from torchdyn.core import NeuralODE
 
 from src.models.BaseGenModel import BaseGenModel
-from src.utils.fid_calculator import FID_score 
+from src.utils.fid_calculator import FID_score
 from src.utils.analog_bit import AnalogBit
+
+
+def load_ig_stats(stats_path: str):
+    with open(stats_path, "r") as f:
+        stats = json.load(f)
+
+    return stats
 
 
 class LayoutFlow(BaseGenModel):
@@ -114,7 +123,7 @@ class LayoutFlow(BaseGenModel):
 
         return xt, ut
 
-    def inference(self, batch, full_traj=False, task=None, ig: bool = False):
+    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name=''):
         """
         If ig=True:
           - returns exactly as full_traj=True plus influence tensor at the end:
@@ -181,12 +190,13 @@ class LayoutFlow(BaseGenModel):
         # Integrated Gradients block
         # --------------------------
         if ig:
-            influence = self._compute_ig_influence_per_timestamp(
+            influence = self.compute_ig_influence_per_timestamp(
                 batch=batch,
                 traj_pre=traj_pre,
                 t_span=t_span,
                 cond_x=cond_x,
                 cond_mask=cond_mask,
+                dataset_name=dataset_name
             )
             # Requirement: if ig=True, return exactly like full_traj=True plus influence
             return traj, cat, cont_cat, influence
@@ -194,7 +204,72 @@ class LayoutFlow(BaseGenModel):
         # Default behavior
         return (traj, cat, cont_cat) if full_traj else (traj[-1], cat[-1])
 
-    def _resolve_ig_target(self, batch):
+    @torch.no_grad()
+    def build_null_elem_data_from_stats(
+            self,
+            stats: dict,
+            device,
+            dtype,
+            use_bbox: str = "median",  # "median" or "mean"
+            use_type: str = "mode",  # "mode" or "mean"
+    ) -> torch.Tensor:
+        """
+        Returns a single "null element" in DATA space, shape [1,1,D_data],
+        where D_data matches the layout feature dimension (bbox + type encoding).
+        DATA space means values are in [0,1], suitable for sampler.preprocess().
+        """
+        if use_bbox == "median":
+            x0 = float(stats["x_median"])
+            y0 = float(stats["y_median"])
+            w0 = float(stats["w_median"])
+            h0 = float(stats["h_median"])
+        elif use_bbox == "mean":
+            x0 = float(stats["x_mean"])
+            y0 = float(stats["y_mean"])
+            w0 = float(stats["w_mean"])
+            h0 = float(stats["h_mean"])
+        else:
+            raise ValueError("use_bbox must be 'median' or 'mean'")
+
+        bbox = torch.tensor([x0, y0, w0, h0], device=device, dtype=dtype).view(1, 1, 4)
+
+        # --- Type part ---
+        if getattr(self, "attr_encoding", None) == "AnalogBit":
+            # Determine a representative category index
+            if use_type == "mode":
+                t_idx = int(stats["type_mode"])
+                t_idx_t = torch.tensor([[t_idx]], device=device, dtype=torch.long)  # [1,1]
+                type_data = self.analog_bit.encode(t_idx_t).to(dtype=dtype)  # [1,1,attr_dim] in {0,1}
+            elif use_type == "mean":
+                # Weighted mean of AnalogBit bits under the empirical type histogram
+                hist = torch.tensor(stats["type_hist"], device=device, dtype=torch.float32)  # [num_cat]
+                denom = hist.sum().clamp_min(1.0)
+
+                # Build [num_cat, attr_dim] encodings and take weighted average
+                idxs = torch.arange(len(stats["type_hist"]), device=device, dtype=torch.long).view(-1, 1)  # [K,1]
+                bits = self.analog_bit.encode(idxs).to(dtype=torch.float32).squeeze(1)  # [K,attr_dim]
+                bit_mean = (hist[:, None] * bits).sum(dim=0) / denom  # [attr_dim]
+                type_data = bit_mean.to(dtype=dtype).view(1, 1, -1)  # [1,1,attr_dim]
+            else:
+                raise ValueError("use_type must be 'mode' or 'mean'")
+
+        else:
+            # Scalar type encoding in [0,1]
+            if use_type == "mode":
+                t_idx = int(stats["type_mode"])
+                t0 = t_idx / float(max(self.num_cat - 1, 1))
+            elif use_type == "mean":
+                t0 = float(stats["conv_type_mean"])  # already normalized in [0,1]
+            else:
+                raise ValueError("use_type must be 'mode' or 'mean'")
+
+            type_data = torch.tensor([t0], device=device, dtype=dtype).view(1, 1, 1)
+
+        null_elem_data = torch.cat([bbox, type_data], dim=-1)  # [1,1,4+type_dim]
+
+        return null_elem_data
+
+    def resolve_ig_target(self, batch):
         """
         Target element index and attribute are expected to be provided via:
           - self.target_idx, self.target_attr (recommended), set externally from cfg
@@ -233,21 +308,24 @@ class LayoutFlow(BaseGenModel):
             out_dims = (2,)
         elif ta in ["h", "height"]:
             out_dims = (3,)
+        elif ta in ["geometry"]:
+            out_dims = (0, 1, 2, 3)
         else:
             raise ValueError(
                 f"[LayoutFlow IG] Unsupported target_attr='{target_attr}'. "
-                "Use: position|size|x|y|w|h."
+                "Use: position|size|geometry|x|y|w|h."
             )
 
         return int(target_idx), out_dims
 
-    def _compute_ig_influence_per_timestamp(
+    def compute_ig_influence_per_timestamp(
         self,
         batch,
-        traj_pre: torch.Tensor,     # [T, B, N, D] in preprocessed space
-        t_span: torch.Tensor,       # [T]
-        cond_x: torch.Tensor,       # [B, N, D]
-        cond_mask: torch.Tensor,    # [B, N, D]
+        traj_pre: torch.Tensor,  # [T, B, N, D] in preprocessed space
+        t_span: torch.Tensor,  # [T]
+        cond_x: torch.Tensor,  # [B, N, D]
+        cond_mask: torch.Tensor,  # [B, N, D]
+        dataset_name: Text
     ) -> torch.Tensor:
         """
         Returns:
@@ -265,35 +343,34 @@ class LayoutFlow(BaseGenModel):
                 "Install with: pip install captum"
             ) from e
 
-        target_idx, out_dims = self._resolve_ig_target(batch)
+        target_idx, out_dims = self.resolve_ig_target(batch)
 
         # Cast masks to float for arithmetic (in case they are bool)
         cond_mask_f = cond_mask.to(dtype=cond_x.dtype)
 
         # Forward function for Captum IG:
-        # input: x_in (preprocessed layout state at timestamp)
-        # additional_forward_args: t_scalar
-        def forward_func(x_in: torch.Tensor, t_scalar: torch.Tensor) -> torch.Tensor:
-            # Ensure t is on the same device as x_in
-            if not torch.is_tensor(t_scalar):
-                t_scalar = torch.tensor(t_scalar, device=x_in.device, dtype=x_in.dtype)
-            else:
-                t_scalar = t_scalar.to(device=x_in.device, dtype=x_in.dtype)
+        def forward_func(x_free: torch.Tensor, cond_vals: torch.Tensor, t_scalar: torch.Tensor) -> torch.Tensor:
+            # Build the actual input to the backbone
+            x_model = (1.0 - cond_mask_f) * cond_vals + cond_mask_f * x_free
 
-            B = x_in.shape[0]
+            # Build t_vec as you already do
+            if not torch.is_tensor(t_scalar):
+                t_scalar = torch.tensor(t_scalar, device=x_model.device, dtype=x_model.dtype)
+            else:
+                t_scalar = t_scalar.to(device=x_model.device, dtype=x_model.dtype)
+
+            B = x_model.shape[0]
             if t_scalar.dim() == 0:
                 t_vec = t_scalar.repeat(B)
             else:
-                # If user passes shape [1], expand; else assume already [B]
-                if t_scalar.numel() == 1:
-                    t_vec = t_scalar.view(1).repeat(B)
-                else:
-                    t_vec = t_scalar.view(-1)
-                    if t_vec.numel() != B:
-                        t_vec = t_vec[:1].repeat(B)
+                t_vec = t_scalar.view(-1)
+                if t_vec.numel() == 1:
+                    t_vec = t_vec.repeat(B)
+                elif t_vec.numel() != B:
+                    t_vec = t_vec[:1].repeat(B)
 
-            v = self(x_in, cond_mask, t_vec)  # vector field: [B, N, D]
-            # scalar output per sample
+            v = self(x_model, cond_mask, t_vec)  # [B,N,D]
+
             out = 0.0
             for d in out_dims:
                 out = out + v[:, target_idx, d]
@@ -311,49 +388,68 @@ class LayoutFlow(BaseGenModel):
             valid_elem_mask = m.to(dtype=cond_x.dtype)  # [B, N]
 
         influences = []
-        delta_arr = np.zeros(100)
-        diff_arr = np.zeros(100)
-        rel_delta_arr = np.zeros(100)
+
+        T = traj_pre.shape[0]
+        delta_arr = np.zeros(T, dtype=np.float32)
+        diff_arr = np.zeros(T, dtype=np.float32)
+        rel_delta_arr = np.zeros(T, dtype=np.float32)
+
+        # Load stats once
+        file_path = os.path.join("stats", f'{dataset_name}.json')
+        stats = load_ig_stats(file_path)
+
+        # Build "null element" in DATA space [0,1]
+        null_elem_data = self.build_null_elem_data_from_stats(
+            stats=stats,
+            device=cond_x.device,
+            dtype=cond_x.dtype,
+            use_bbox="median",  # or "mean"
+            use_type="mode",  # or "mean"
+        )  # [1,1,D]
+
+        # Convert to PREPROCESSED space (matches x_k / cond_x)
+        null_elem_pre = self.sampler.preprocess(null_elem_data)  # [1,1,D]
 
         # We must re-enable gradients even if caller is inside torch.no_grad()
         with torch.enable_grad():
             for k in range(traj_pre.shape[0]):
                 # x_k is solver state (preprocessed)
-                x_k = traj_pre[k]  # [B, N, D]
+                x_k = traj_pre[k]  # [B,N,D]
+                null = null_elem_pre.expand_as(x_k)  # [B,N,D]
 
-                # Build the *actual* input seen by the backbone (respect conditioning mask)
-                x_in = (1.0 - cond_mask_f) * cond_x + cond_mask_f * x_k
+                baseline_x_free = (1.0 - cond_mask_f) * x_k + cond_mask_f * null
+                baseline_cond = cond_mask_f * cond_x + (1.0 - cond_mask_f) * null
 
-                # baseline_free could be zeros, or better: a dataset-mean "null element" in preprocessed space
-                baseline_free = torch.zeros_like(x_in)
-                baseline = (1.0 - cond_mask_f) * x_in + cond_mask_f * baseline_free
-
-                # Captum call
-                attr, delta = ig.attribute(
-                    inputs=x_in,
-                    baselines=baseline,
+                (attributions, delta) = ig.attribute(
+                    inputs=(x_k, cond_x),
+                    baselines=(baseline_x_free, baseline_cond),
                     additional_forward_args=(t_span[k],),
                     n_steps=int(getattr(self, "ig_steps", 32)),
-                    return_convergence_delta=True
-                )  # [B, N, D]
+                    return_convergence_delta=True,
+                )
+
+                attr_free, attr_cond = attributions
+                attr = cond_mask_f * attr_free + (1.0 - cond_mask_f) * attr_cond  # [B,N,D]
 
                 # Compute F(x) - F(baseline) for the same forward_func definition
-                Fx = forward_func(x_in, t_span[k]).detach()
-                Fb = forward_func(baseline, t_span[k]).detach()
+                Fx = forward_func(x_k, cond_x, t_span[k]).detach()
+                Fb = forward_func(baseline_x_free, baseline_cond, t_span[k]).detach()
                 diff = (Fx - Fb).abs()
-                rel_delta = delta.abs() / (diff + 1e-6)
+                delta_s = delta.detach().abs().mean().item()
+                diff_s = diff.detach().mean().item()
+                rel_s = (delta.detach().abs() / (diff.detach() + 1e-6)).mean().item()
 
-                delta_arr[k] = delta.abs()
-                diff_arr[k] = diff
-                rel_delta_arr[k] = rel_delta
+                delta_arr[k] = delta_s
+                diff_arr[k] = diff_s
+                rel_delta_arr[k] = rel_s
 
                 # Aggregate per element i into 3 scalars
                 # (Assumes first 4 dims are x,y,w,h; remaining are type encoding channels.)
-                pos_inf = attr[..., 0] + attr[..., 1]                       # [B, N]
-                size_inf = attr[..., 2] + attr[..., 3]                      # [B, N]
-                type_inf = attr[..., self.geom_dim:].sum(dim=-1)            # [B, N]
+                pos_inf = attr[..., 0] + attr[..., 1]  # [B, N]
+                size_inf = attr[..., 2] + attr[..., 3]  # [B, N]
+                type_inf = attr[..., self.geom_dim:].sum(dim=-1)  # [B, N]
 
-                infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1) # [B, N, 3]
+                infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1)  # [B, N, 3]
 
                 if valid_elem_mask is not None:
                     infl_k = infl_k * valid_elem_mask.unsqueeze(-1)
@@ -365,8 +461,8 @@ class LayoutFlow(BaseGenModel):
         print("rel_delta mean:", rel_delta_arr.mean())
 
         influence = torch.stack(influences, dim=0)  # [T, B, N, 3]
-        return influence
 
+        return influence
 
 
 class torch_wrapper(torch.nn.Module):

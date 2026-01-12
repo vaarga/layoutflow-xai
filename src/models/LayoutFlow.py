@@ -445,9 +445,9 @@ class LayoutFlow(BaseGenModel):
 
                 # Aggregate per element i into 3 scalars
                 # (Assumes first 4 dims are x,y,w,h; remaining are type encoding channels.)
-                pos_inf = attr[..., 0] + attr[..., 1]  # [B, N]
-                size_inf = attr[..., 2] + attr[..., 3]  # [B, N]
-                type_inf = attr[..., self.geom_dim:].sum(dim=-1)  # [B, N]
+                pos_inf = torch.abs(attr[..., 0]) + torch.abs(attr[..., 1])  # [B,N]
+                size_inf = torch.abs(attr[..., 2]) + torch.abs(attr[..., 3])  # [B,N]
+                type_inf = torch.abs(attr[..., self.geom_dim:]).sum(dim=-1)  # [B,N]
 
                 infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1)  # [B, N, 3]
 

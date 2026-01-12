@@ -187,7 +187,8 @@ def main(cfg: DictConfig):
                             geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch,
                                                                                             task=cfg.task,
                                                                                             ig=True,
-                                                                                            dataset_name=cfg.dataset_name)
+                                                                                            dataset_name=cfg.dataset_name,
+                                                                                            ig_return_xy=cfg.ig_return_xy)
 
                             print("geom_traj:", geom_traj.shape)  # [T, B, N, 4]
                             print("cat_traj:", cat_traj.shape)  # [T, B, N]
@@ -207,6 +208,7 @@ def main(cfg: DictConfig):
                                     influence=influence,
                                     target_idx=target_idx,
                                     target_attr=target_attr,
+                                    ig_return_xy=cfg.ig_return_xy
                                 )
 
                         except Exception as e:

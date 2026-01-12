@@ -270,6 +270,7 @@ def visualize_trajectory(
         out_root="./vis_traj",
         num_colors=26,
         square=False,
+        ig_return_xy=False,
 ) -> None:
     """
     Saves one animated GIF per instance showing the trajectory over T steps.

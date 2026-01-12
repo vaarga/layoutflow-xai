@@ -24,6 +24,7 @@ seed: 42
 explain: True
 target_idx: 6
 target_attr: geometry
+ig_return_xy: False
 dataset_name: ${hydra:runtime.choices.dataset}
 
 hydra:  

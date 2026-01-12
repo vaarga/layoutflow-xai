@@ -123,7 +123,7 @@ class LayoutFlow(BaseGenModel):
 
         return xt, ut
 
-    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name=''):
+    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name='', ig_return_xy=False):
         """
         If ig=True:
           - returns exactly as full_traj=True plus influence tensor at the end:
@@ -196,7 +196,8 @@ class LayoutFlow(BaseGenModel):
                 t_span=t_span,
                 cond_x=cond_x,
                 cond_mask=cond_mask,
-                dataset_name=dataset_name
+                dataset_name=dataset_name,
+                ig_return_xy=ig_return_xy
             )
             # Requirement: if ig=True, return exactly like full_traj=True plus influence
             return traj, cat, cont_cat, influence
@@ -319,22 +320,27 @@ class LayoutFlow(BaseGenModel):
         return int(target_idx), out_dims
 
     def compute_ig_influence_per_timestamp(
-        self,
-        batch,
-        traj_pre: torch.Tensor,  # [T, B, N, D] in preprocessed space
-        t_span: torch.Tensor,  # [T]
-        cond_x: torch.Tensor,  # [B, N, D]
-        cond_mask: torch.Tensor,  # [B, N, D]
-        dataset_name: Text
+            self,
+            batch,
+            traj_pre: torch.Tensor,  # [T, B, N, D] in preprocessed space
+            t_span: torch.Tensor,  # [T]
+            cond_x: torch.Tensor,  # [B, N, D]
+            cond_mask: torch.Tensor,  # [B, N, D]
+            dataset_name: Text,
+            ig_return_xy: bool
     ) -> torch.Tensor:
         """
-        Returns:
-          influence: [T, B, N, 3] where last dim is:
-            0: position influence (x+y)
-            1: size influence (w+h)
-            2: type influence (sum over type channels)
+        Default (existing) behavior:
+          Returns influence: [T, B, N, 3] where last dim is:
+            0: position importance (|x|+|y|)
+            1: size importance (|w|+|h|)
+            2: type importance (sum(|type_dims|))
+
+        Optional 2x20 behavior (only when batch["ig_return_xy"] == True and target_attr is position/xy):
+          Returns influence: [T, B, N, 2] where last dim is:
+            0: total per-element importance on target x-velocity
+            1: total per-element importance on target y-velocity
         """
-        # Lazy import so normal inference does not require Captum
         try:
             from captum.attr import IntegratedGradients
         except Exception as e:
@@ -345,15 +351,14 @@ class LayoutFlow(BaseGenModel):
 
         target_idx, out_dims = self.resolve_ig_target(batch)
 
-        # Cast masks to float for arithmetic (in case they are bool)
+        # only meaningful for position targets!
+        ig_return_xy = ig_return_xy and (out_dims == (0, 1))
+
         cond_mask_f = cond_mask.to(dtype=cond_x.dtype)
 
-        # Forward function for Captum IG:
         def forward_func(x_free: torch.Tensor, cond_vals: torch.Tensor, t_scalar: torch.Tensor) -> torch.Tensor:
-            # Build the actual input to the backbone
             x_model = (1.0 - cond_mask_f) * cond_vals + cond_mask_f * x_free
 
-            # Build t_vec as you already do
             if not torch.is_tensor(t_scalar):
                 t_scalar = torch.tensor(t_scalar, device=x_model.device, dtype=x_model.dtype)
             else:
@@ -378,89 +383,162 @@ class LayoutFlow(BaseGenModel):
 
         ig = IntegratedGradients(forward_func)
 
-        # Determine valid element mask (to zero-out padding influences)
         valid_elem_mask = None
         if isinstance(batch, dict) and ("mask" in batch):
             m = batch["mask"]
-            # mask is often [B, N, 1] bool
             if m.dim() == 3:
                 m = m[..., 0]
             valid_elem_mask = m.to(dtype=cond_x.dtype)  # [B, N]
 
         influences = []
-
         T = traj_pre.shape[0]
+
+        # --- Existing delta arrays (3x20 path) ---
         delta_arr = np.zeros(T, dtype=np.float32)
         diff_arr = np.zeros(T, dtype=np.float32)
         rel_delta_arr = np.zeros(T, dtype=np.float32)
 
-        # Load stats once
+        # --- NEW: separate delta arrays for 2x20 path ---
+        if ig_return_xy:
+            delta_arr_x = np.zeros(T, dtype=np.float32)
+            diff_arr_x = np.zeros(T, dtype=np.float32)
+            rel_delta_arr_x = np.zeros(T, dtype=np.float32)
+
+            delta_arr_y = np.zeros(T, dtype=np.float32)
+            diff_arr_y = np.zeros(T, dtype=np.float32)
+            rel_delta_arr_y = np.zeros(T, dtype=np.float32)
+
         file_path = os.path.join("stats", f'{dataset_name}.json')
         stats = load_ig_stats(file_path)
 
-        # Build "null element" in DATA space [0,1]
         null_elem_data = self.build_null_elem_data_from_stats(
             stats=stats,
             device=cond_x.device,
             dtype=cond_x.dtype,
-            use_bbox="median",  # or "mean"
-            use_type="mode",  # or "mean"
+            use_bbox="median",
+            use_type="mode",
         )  # [1,1,D]
 
-        # Convert to PREPROCESSED space (matches x_k / cond_x)
         null_elem_pre = self.sampler.preprocess(null_elem_data)  # [1,1,D]
 
-        # We must re-enable gradients even if caller is inside torch.no_grad()
         with torch.enable_grad():
             for k in range(traj_pre.shape[0]):
-                # x_k is solver state (preprocessed)
                 x_k = traj_pre[k]  # [B,N,D]
                 null = null_elem_pre.expand_as(x_k)  # [B,N,D]
 
                 baseline_x_free = (1.0 - cond_mask_f) * x_k + cond_mask_f * null
                 baseline_cond = cond_mask_f * cond_x + (1.0 - cond_mask_f) * null
 
-                (attributions, delta) = ig.attribute(
-                    inputs=(x_k, cond_x),
-                    baselines=(baseline_x_free, baseline_cond),
-                    additional_forward_args=(t_span[k],),
-                    n_steps=int(getattr(self, "ig_steps", 32)),
-                    return_convergence_delta=True,
-                )
+                # --------------------------
+                # NEW: 2x20 branch (x and y separately)
+                # --------------------------
+                if ig_return_xy:
+                    orig_out_dims = out_dims
 
-                attr_free, attr_cond = attributions
-                attr = cond_mask_f * attr_free + (1.0 - cond_mask_f) * attr_cond  # [B,N,D]
+                    # ----- X component -----
+                    out_dims = (0,)
+                    (attributions_x, delta_x) = ig.attribute(
+                        inputs=(x_k, cond_x),
+                        baselines=(baseline_x_free, baseline_cond),
+                        additional_forward_args=(t_span[k],),
+                        n_steps=int(getattr(self, "ig_steps", 32)),
+                        return_convergence_delta=True,
+                    )
+                    attr_free_x, attr_cond_x = attributions_x
+                    attr_x = cond_mask_f * attr_free_x + (1.0 - cond_mask_f) * attr_cond_x  # [B,N,D]
 
-                # Compute F(x) - F(baseline) for the same forward_func definition
-                Fx = forward_func(x_k, cond_x, t_span[k]).detach()
-                Fb = forward_func(baseline_x_free, baseline_cond, t_span[k]).detach()
-                diff = (Fx - Fb).abs()
-                delta_s = delta.detach().abs().mean().item()
-                diff_s = diff.detach().mean().item()
-                rel_s = (delta.detach().abs() / (diff.detach() + 1e-6)).mean().item()
+                    Fx = forward_func(x_k, cond_x, t_span[k]).detach()
+                    Fb = forward_func(baseline_x_free, baseline_cond, t_span[k]).detach()
+                    diff_x = (Fx - Fb).abs()
+                    delta_arr_x[k] = delta_x.detach().abs().mean().item()
+                    diff_arr_x[k] = diff_x.detach().mean().item()
+                    rel_delta_arr_x[k] = (delta_x.detach().abs() / (diff_x.detach() + 1e-6)).mean().item()
 
-                delta_arr[k] = delta_s
-                diff_arr[k] = diff_s
-                rel_delta_arr[k] = rel_s
+                    # total per-element signed contribution on target-x output
+                    imp_x = attr_x.sum(dim=-1)  # [B,N]
 
-                # Aggregate per element i into 3 scalars
-                # (Assumes first 4 dims are x,y,w,h; remaining are type encoding channels.)
-                pos_inf = torch.abs(attr[..., 0]) + torch.abs(attr[..., 1])  # [B,N]
-                size_inf = torch.abs(attr[..., 2]) + torch.abs(attr[..., 3])  # [B,N]
-                type_inf = torch.abs(attr[..., self.geom_dim:]).sum(dim=-1)  # [B,N]
+                    # ----- Y component -----
+                    out_dims = (1,)
+                    (attributions_y, delta_y) = ig.attribute(
+                        inputs=(x_k, cond_x),
+                        baselines=(baseline_x_free, baseline_cond),
+                        additional_forward_args=(t_span[k],),
+                        n_steps=int(getattr(self, "ig_steps", 32)),
+                        return_convergence_delta=True,
+                    )
+                    attr_free_y, attr_cond_y = attributions_y
+                    attr_y = cond_mask_f * attr_free_y + (1.0 - cond_mask_f) * attr_cond_y  # [B,N,D]
 
-                infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1)  # [B, N, 3]
+                    Fy = forward_func(x_k, cond_x, t_span[k]).detach()
+                    Fby = forward_func(baseline_x_free, baseline_cond, t_span[k]).detach()
+                    diff_y = (Fy - Fby).abs()
+                    delta_arr_y[k] = delta_y.detach().abs().mean().item()
+                    diff_arr_y[k] = diff_y.detach().mean().item()
+                    rel_delta_arr_y[k] = (delta_y.detach().abs() / (diff_y.detach() + 1e-6)).mean().item()
 
-                if valid_elem_mask is not None:
-                    infl_k = infl_k * valid_elem_mask.unsqueeze(-1)
+                    # total per-element signed contribution on target-y output
+                    imp_y = attr_y.sum(dim=-1)  # [B,N]
 
-                influences.append(infl_k)
+                    # restore
+                    out_dims = orig_out_dims
 
-        print("delta mean:", delta_arr.mean())
-        print("diff mean:", diff_arr.mean())
-        print("rel_delta mean:", rel_delta_arr.mean())
+                    infl_k = torch.stack([imp_x, imp_y], dim=-1)  # [B,N,2]
 
-        influence = torch.stack(influences, dim=0)  # [T, B, N, 3]
+                    if valid_elem_mask is not None:
+                        infl_k = infl_k * valid_elem_mask.unsqueeze(-1)
+
+                    influences.append(infl_k)
+                else:
+                    # --------------------------
+                    # Existing 3x20 branch (UNCHANGED)
+                    # --------------------------
+                    (attributions, delta) = ig.attribute(
+                        inputs=(x_k, cond_x),
+                        baselines=(baseline_x_free, baseline_cond),
+                        additional_forward_args=(t_span[k],),
+                        n_steps=int(getattr(self, "ig_steps", 32)),
+                        return_convergence_delta=True,
+                    )
+
+                    attr_free, attr_cond = attributions
+                    attr = cond_mask_f * attr_free + (1.0 - cond_mask_f) * attr_cond  # [B,N,D]
+
+                    Fx = forward_func(x_k, cond_x, t_span[k]).detach()
+                    Fb = forward_func(baseline_x_free, baseline_cond, t_span[k]).detach()
+                    diff = (Fx - Fb).abs()
+                    delta_s = delta.detach().abs().mean().item()
+                    diff_s = diff.detach().mean().item()
+                    rel_s = (delta.detach().abs() / (diff.detach() + 1e-6)).mean().item()
+
+                    delta_arr[k] = delta_s
+                    diff_arr[k] = diff_s
+                    rel_delta_arr[k] = rel_s
+
+                    pos_inf = torch.abs(attr[..., 0]) + torch.abs(attr[..., 1])  # [B,N]
+                    size_inf = torch.abs(attr[..., 2]) + torch.abs(attr[..., 3])  # [B,N]
+                    type_inf = torch.abs(attr[..., self.geom_dim:]).sum(dim=-1)  # [B,N]
+
+                    infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1)  # [B,N,3]
+
+                    if valid_elem_mask is not None:
+                        infl_k = infl_k * valid_elem_mask.unsqueeze(-1)
+
+                    influences.append(infl_k)
+
+        # Prints
+        if ig_return_xy:
+            print("X: delta mean:", float(delta_arr_x.mean()))
+            print("X: diff mean:", float(diff_arr_x.mean()))
+            print("X: rel_delta mean:", float(rel_delta_arr_x.mean()))
+            print("Y: delta mean:", float(delta_arr_y.mean()))
+            print("Y: diff mean:", float(diff_arr_y.mean()))
+            print("Y: rel_delta mean:", float(rel_delta_arr_y.mean()))
+        else:
+            print("delta mean:", float(delta_arr.mean()))
+            print("diff mean:", float(diff_arr.mean()))
+            print("rel_delta mean:", float(rel_delta_arr.mean()))
+
+        influence = torch.stack(influences, dim=0)  # [T, B, N, 3] or [T, B, N, 2]
 
         return influence
 

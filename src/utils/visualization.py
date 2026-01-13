@@ -65,7 +65,7 @@ def draw_xai_layout_xy_vectors(
     border_width=2,
     arrow_width=2,
     arrow_max_len_px=40,     # longest arrow length (pixels)
-    arrow_head_len_px=8,
+    arrow_head_len_px=14,
     arrow_head_angle_deg=25,
     skip_target_arrow=True,
     global_max_mag=None,     # float; if provided -> consistent scaling across frames
@@ -223,10 +223,13 @@ def draw_xai_layout_xy_vectors(
 
             # scale for layer
             cx_s, cy_s = cx * coord_mul, cy * coord_mul
-            r = 6.0 * coord_mul
+            r = 3.0 * coord_mul
             w = max(1, int(round(2.0 * coord_mul)))
 
-            draw_obj.ellipse([cx_s - r, cy_s - r, cx_s + r, cy_s + r], outline=(0, 0, 0, 255), width=w)
+            draw_obj.ellipse([cx_s - r, cy_s - r, cx_s + r, cy_s + r],
+                             outline=(0, 0, 0, 255),
+                             fill=(0, 0, 0, 255),
+                             width=w)
 
     # --- 2) Draw arrows + circle (AA overlay if enabled) ---
     if aa_overlay and (infl_t is not None or target_idx is not None):

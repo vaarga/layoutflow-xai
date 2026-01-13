@@ -380,8 +380,6 @@ class LayoutFlow(BaseGenModel):
                 out = out + v[:, target_idx, d]
             return out
 
-        ig = IntegratedGradients(forward_func)
-
         valid_elem_mask = None
         if isinstance(batch, dict) and ("mask" in batch):
             m = batch["mask"]
@@ -436,7 +434,8 @@ class LayoutFlow(BaseGenModel):
 
                     # ----- X component -----
                     out_dims = (0,)
-                    (attributions_x, delta_x) = ig.attribute(
+                    ig_x = IntegratedGradients(forward_func)
+                    (attributions_x, delta_x) = ig_x.attribute(
                         inputs=(x_k, cond_x),
                         baselines=(baseline_x_free, baseline_cond),
                         additional_forward_args=(t_span[k],),
@@ -458,7 +457,8 @@ class LayoutFlow(BaseGenModel):
 
                     # ----- Y component -----
                     out_dims = (1,)
-                    (attributions_y, delta_y) = ig.attribute(
+                    ig_y = IntegratedGradients(forward_func)
+                    (attributions_y, delta_y) = ig_y.attribute(
                         inputs=(x_k, cond_x),
                         baselines=(baseline_x_free, baseline_cond),
                         additional_forward_args=(t_span[k],),
@@ -489,8 +489,9 @@ class LayoutFlow(BaseGenModel):
                     influences.append(infl_k)
                 else:
                     # --------------------------
-                    # Existing 3x20 branch (UNCHANGED)
+                    # Existing 3x20 branch
                     # --------------------------
+                    ig = IntegratedGradients(forward_func)
                     (attributions, delta) = ig.attribute(
                         inputs=(x_k, cond_x),
                         baselines=(baseline_x_free, baseline_cond),

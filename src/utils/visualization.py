@@ -73,33 +73,39 @@ def draw_xai_layout_xy_vectors(
     aa_scale=4,              # supersampling factor (3–6 is typical)
 ):
     """
-    Draws layout rectangles (same coloring convention), then draws one arrow per element i:
-      vector_i = (influence_xy[i,0], influence_xy[i,1])
-    Arrow direction: sign of (dx,dy)
-    Arrow length: magnitude sqrt(dx^2 + dy^2) scaled to arrow_max_len_px.
+    Rectangles are drawn on the base image (non-AA, as requested).
+    Arrows + target circle are drawn on a supersampled transparent overlay (AA),
+    then downsampled and composited onto the base.
 
-    Rectangles remain non-antialiased.
-    Arrows + target marker are antialiased via supersampled overlay when aa_overlay=True.
+    - No clamping of box corners to [0,1] (prevents "growing" illusion).
+    - No outer padding/border is added.
+    - Normalized coords are mapped to actual canvas size (W,H); overflow is clipped by PIL.
     """
     colors = gen_colors(num_colors)
 
-    # Background (keep base as RGB; we'll composite AA overlay later)
+    # --- Background ---
     if background_img is not None:
         img = background_img.copy()
         if img.mode != "RGB":
             img = img.convert("RGB")
     else:
-        img = Image.new("RGB", (256, 256), color=(255, 255, 255)) if square else Image.new(
-            "RGB", (256, int(4/3*256)), color=(255, 255, 255)
+        img = (
+            Image.new("RGB", (256, 256), (255, 255, 255))
+            if square
+            else Image.new("RGB", (256, int(4 / 3 * 256)), (255, 255, 255))
         )
 
     W, H = img.size
     draw = ImageDraw.Draw(img, "RGBA")
 
-    # Tensors -> CPU
+    # --- Inputs -> tensors on CPU ---
     layout_t = layout.detach().cpu() if torch.is_tensor(layout) else torch.tensor(layout)
-    feats_t  = features.detach().cpu() if torch.is_tensor(features) else torch.tensor(features)
-    layout_t = torch.clip(layout_t, 0, 1)
+    feats_t = features.detach().cpu() if torch.is_tensor(features) else torch.tensor(features)
+
+    # Do NOT clamp positions/corners; only guard against negative sizes
+    if layout_t.numel() > 0 and layout_t.shape[-1] >= 4:
+        layout_t = layout_t.clone()
+        layout_t[:, 2:4] = torch.clamp(layout_t[:, 2:4], min=0.0)
 
     # Influence
     if influence_xy is not None:
@@ -109,19 +115,9 @@ def draw_xai_layout_xy_vectors(
     else:
         infl_t = None
 
-    # Boxes
-    if format == "ltwh":
-        box = torch.stack([layout_t[:,0], layout_t[:,1], layout_t[:,2]+layout_t[:,0], layout_t[:,3]+layout_t[:,1]], dim=1)
-    elif format == "xywh":
-        box = torch.stack([layout_t[:,0]-layout_t[:,2]/2, layout_t[:,1]-layout_t[:,3]/2, layout_t[:,0]+layout_t[:,2]/2, layout_t[:,1]+layout_t[:,3]/2], dim=1)
-    elif format == "ltrb":
-        box = torch.stack([layout_t[:,0], layout_t[:,1], torch.maximum(layout_t[:,0], layout_t[:,2]), torch.maximum(layout_t[:,1], layout_t[:,3])], dim=1)
-    else:
-        raise ValueError(f"Error: {format} format not supported.")
-
-    box = 255 * torch.clamp(box, 0, 1)
-
     S = int(layout_t.shape[0])
+
+    # Target index sanitize
     if target_idx is not None:
         try:
             target_idx = int(target_idx)
@@ -130,7 +126,57 @@ def draw_xai_layout_xy_vectors(
         if target_idx is not None and not (0 <= target_idx < S):
             target_idx = None
 
-    # --- 1) Draw rectangles on base (no AA, as requested) ---
+    # --- Boxes in normalized coords (NO CLAMP) ---
+    if S == 0:
+        box_n = torch.zeros((0, 4), dtype=torch.float32)
+    else:
+        if format == "ltwh":
+            box_n = torch.stack(
+                [
+                    layout_t[:, 0],
+                    layout_t[:, 1],
+                    layout_t[:, 0] + layout_t[:, 2],
+                    layout_t[:, 1] + layout_t[:, 3],
+                ],
+                dim=1,
+            )
+        elif format == "xywh":
+            box_n = torch.stack(
+                [
+                    layout_t[:, 0] - layout_t[:, 2] / 2,
+                    layout_t[:, 1] - layout_t[:, 3] / 2,
+                    layout_t[:, 0] + layout_t[:, 2] / 2,
+                    layout_t[:, 1] + layout_t[:, 3] / 2,
+                ],
+                dim=1,
+            )
+        elif format == "ltrb":
+            box_n = torch.stack([layout_t[:, 0], layout_t[:, 1], layout_t[:, 2], layout_t[:, 3]], dim=1)
+        else:
+            raise ValueError(f"Error: {format} format not supported.")
+
+    # Ensure correct ordering (robust against swapped corners)
+    if S > 0:
+        x1n = torch.minimum(box_n[:, 0], box_n[:, 2])
+        x2n = torch.maximum(box_n[:, 0], box_n[:, 2])
+        y1n = torch.minimum(box_n[:, 1], box_n[:, 3])
+        y2n = torch.maximum(box_n[:, 1], box_n[:, 3])
+        box_n = torch.stack([x1n, y1n, x2n, y2n], dim=1)
+
+    # --- Convert to pixel coords based on actual canvas size ---
+    sx = float(W - 1)
+    sy = float(H - 1)
+    box = torch.stack(
+        [
+            box_n[:, 0] * sx,
+            box_n[:, 1] * sy,
+            box_n[:, 2] * sx,
+            box_n[:, 3] * sy,
+        ],
+        dim=1,
+    ) if S > 0 else box_n
+
+    # --- 1) Draw rectangles on base (non-AA) ---
     for i in range(S):
         cat_raw = feats_t[i].item()
         cat = int(cat_raw) - 1
@@ -139,27 +185,23 @@ def draw_xai_layout_xy_vectors(
         col = colors[cat] if 0 <= cat < len(colors) else [0, 0, 0]
 
         x1, y1, x2, y2 = box[i].tolist()
-        if not square:
-            y1 = (4/3) * y1
-            y2 = (4/3) * y2
-
         draw.rectangle([x1, y1, x2, y2], fill=tuple(col) + (64,))
         draw.rectangle([x1, y1, x2, y2], outline=tuple(col) + (200,), width=int(border_width))
 
-    # Helper: draw arrows + circle onto a given ImageDraw with coordinate multiplier
+    # Helper: draw arrows + target circle onto a given ImageDraw, scaling coords by coord_mul
     def _draw_arrows_and_target(draw_obj, coord_mul: float):
         nonlocal infl_t, target_idx
 
-        # Draw arrows
+        # Arrows
         if infl_t is not None and S > 0:
             dx = infl_t[:, 0]
             dy = infl_t[:, 1]
-            mag = torch.sqrt(dx*dx + dy*dy)
+            mag = torch.sqrt(dx * dx + dy * dy)
 
-            # scaling (use global max if provided for consistency across frames)
             max_mag = float(global_max_mag) if (global_max_mag is not None) else float(mag.max().item() if mag.numel() else 0.0)
             if max_mag <= 1e-12:
                 max_mag = 1.0
+
             scale = float(arrow_max_len_px) / max_mag
 
             head_angle = math.radians(float(arrow_head_angle_deg))
@@ -174,35 +216,26 @@ def draw_xai_layout_xy_vectors(
                 if m <= 1e-12:
                     continue
 
-                # alpha by relative magnitude
                 a = int(round(255.0 * min(1.0, m / max_mag)))
-                a = max(40, a)  # keep visible
+                a = max(40, a)
 
-                # Arrow from element center
                 x1, y1, x2, y2 = box[i].tolist()
-                if not square:
-                    y1 = (4/3) * y1
-                    y2 = (4/3) * y2
-
                 cx = (x1 + x2) / 2.0
                 cy = (y1 + y2) / 2.0
 
                 vx = float(dx[i].item()) * scale
                 vy = float(dy[i].item()) * scale
-
                 ex = cx + vx
                 ey = cy + vy
 
-                # scale coords for supersampling layer
                 cx_s, cy_s = cx * coord_mul, cy * coord_mul
                 ex_s, ey_s = ex * coord_mul, ey * coord_mul
 
-                # main shaft
+                # shaft
                 draw_obj.line([cx_s, cy_s, ex_s, ey_s], fill=(0, 0, 0, a), width=shaft_w)
 
-                # arrow head (two lines)
+                # head
                 ang = math.atan2(vy, vx)
-
                 xh1 = ex_s - hl * math.cos(ang - head_angle)
                 yh1 = ey_s - hl * math.sin(ang - head_angle)
                 xh2 = ex_s - hl * math.cos(ang + head_angle)
@@ -211,47 +244,40 @@ def draw_xai_layout_xy_vectors(
                 draw_obj.line([ex_s, ey_s, xh1, yh1], fill=(0, 0, 0, a), width=shaft_w)
                 draw_obj.line([ex_s, ey_s, xh2, yh2], fill=(0, 0, 0, a), width=shaft_w)
 
-        # Draw target marker (circle)
+        # Target marker (filled circle)
         if target_idx is not None and 0 <= target_idx < S:
             x1, y1, x2, y2 = box[target_idx].tolist()
-            if not square:
-                y1 = (4/3) * y1
-                y2 = (4/3) * y2
-
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
 
-            # scale for layer
             cx_s, cy_s = cx * coord_mul, cy * coord_mul
             r = 3.0 * coord_mul
             w = max(1, int(round(2.0 * coord_mul)))
 
-            draw_obj.ellipse([cx_s - r, cy_s - r, cx_s + r, cy_s + r],
-                             outline=(0, 0, 0, 255),
-                             fill=(0, 0, 0, 255),
-                             width=w)
+            draw_obj.ellipse(
+                [cx_s - r, cy_s - r, cx_s + r, cy_s + r],
+                outline=(0, 0, 0, 255),
+                fill=(0, 0, 0, 255),
+                width=w,
+            )
 
-    # --- 2) Draw arrows + circle (AA overlay if enabled) ---
+    # --- 2) AA overlay for arrows + circle ---
     if aa_overlay and (infl_t is not None or target_idx is not None):
         aa = int(max(1, aa_scale))
-        # supersampled transparent overlay
         overlay_hi = Image.new("RGBA", (W * aa, H * aa), (0, 0, 0, 0))
         draw_hi = ImageDraw.Draw(overlay_hi, "RGBA")
 
         _draw_arrows_and_target(draw_hi, coord_mul=float(aa))
 
-        # downsample overlay to base size with high-quality filter
+        # Downsample and composite
         overlay = overlay_hi.resize((W, H), resample=Image.LANCZOS)
-
-        # composite onto base
         base_rgba = img.convert("RGBA")
-        base_rgba = Image.alpha_composite(base_rgba, overlay)
-        img = base_rgba.convert("RGB")
+        img = Image.alpha_composite(base_rgba, overlay).convert("RGB")
     else:
-        # fallback: draw directly on base (non-AA)
+        # Non-AA fallback
         _draw_arrows_and_target(draw, coord_mul=1.0)
 
-    img = ImageOps.expand(img, border=2, fill=(255, 255, 255))
+    # No ImageOps.expand here: no padding, as requested
     return img
 
 

@@ -425,6 +425,20 @@ def draw_xai_layout(
         if target_idx is not None and not (0 <= target_idx < S):
             target_idx = None
 
+    # --- AA overlay for center markers ONLY (keeps rectangles unchanged / non-AA) ---
+    aa_scale = 4  # you can parameterize this if you want
+    aa = int(max(1, aa_scale))
+    overlay_hi = None
+    draw_hi = None
+
+    # Only create the overlay if we will draw markers at all
+    # (marker_alpha is only not None when influence_pct is not None)
+    if influence_pct is not None:
+        overlay_hi = Image.new("RGBA", (W * aa, H * aa), (0, 0, 0, 0))
+        draw_hi = ImageDraw.Draw(overlay_hi, "RGBA")
+
+    marker_outline_w = 1  # logical width at base resolution
+
     # --- Draw elements ---
     for i in range(S):
         cat_raw = feats_t[i].item()
@@ -453,20 +467,33 @@ def draw_xai_layout(
             fill_rgba = tuple(col) + (fill_alpha,)
             outline_rgba = (0, 0, 0, border_alpha)
 
-        # Fill (type influence) and border (size influence)
+        # Fill (type influence) and border (size influence) on BASE (non-AA)
         draw.rectangle([x1, y1, x2, y2], fill=fill_rgba)
         draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(border_width))
 
-        # Center marker (position influence)
+        # Center marker (position influence) on AA OVERLAY
         if marker_alpha is not None:
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
             r = float(point_radius)
 
+            # draw at supersampled resolution
+            cx_s, cy_s = cx * aa, cy * aa
+            r_s = r * aa
+            bbox_s = [cx_s - r_s, cy_s - r_s, cx_s + r_s, cy_s + r_s]
+
             if target_idx is not None and i == target_idx:
-                draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 0, 0, marker_alpha))
+                # filled AA circle
+                draw_hi.ellipse(bbox_s, fill=(0, 0, 0, marker_alpha))
             else:
-                draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, marker_alpha))
+                # outlined AA circle (scale stroke width too)
+                w_s = max(1, int(round(marker_outline_w * aa)))
+                draw_hi.ellipse(bbox_s, outline=(0, 0, 0, marker_alpha), width=w_s)
+
+    # --- Composite AA markers back onto base ---
+    if overlay_hi is not None:
+        overlay = overlay_hi.resize((W, H), resample=Image.LANCZOS)
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
     return img
 

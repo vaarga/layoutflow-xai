@@ -7,6 +7,17 @@ from PIL import Image, ImageDraw, ImageOps
 from utils.utils import convert_bbox
 
 
+def gen_colors(num_colors):
+    """
+    Generate uniformly distributed `num_colors` colors
+    :param num_colors:
+    :return:
+    """
+    palette = sns.color_palette("husl", num_colors)
+    rgb_triples = [[int(x[0]*255), int(x[1]*255), int(x[2]*255)] for x in palette]
+    return rgb_triples
+
+
 def draw_layout(layout, features, num_colors=6, format='xywh', background_img=None, square=True):
     '''
     layout (S, 4): layout bbox given as (x, y, w, h) and in range (0, 1)
@@ -277,7 +288,6 @@ def draw_xai_layout_xy_vectors(
         # Non-AA fallback
         _draw_arrows_and_target(draw, coord_mul=1.0)
 
-    # No ImageOps.expand here: no padding, as requested
     return img
 
 
@@ -288,7 +298,7 @@ def draw_xai_layout(
     format="xywh",
     background_img=None,
     square=True,
-    influence=None,      # [L, 3] = [pos, size, type] raw IG (can be negative)
+    influence=None,      # [S, 3] = [pos, size, type] raw IG (can be negative)
     target_idx=None,     # int
     *,
     border_width=2,
@@ -296,73 +306,75 @@ def draw_xai_layout(
     star_outer_radius=7,
 ):
     """
-    layout (S, 4): bbox in (0,1)
-    features (S,): category ids used only for base color (no text shown)
+    layout (S, 4): bbox in normalized coordinates (not forcibly clamped to [0,1])
+    features (S,) or (S,1): category ids used only for base color
 
     If influence is provided:
-      - influence is converted to per-category percentages over all elements (per timestamp)
+      - influence is converted to per-element percentages over all elements (per timestamp)
       - marker opacity encodes position influence %
       - border opacity encodes size influence %
       - fill opacity encodes type influence %
       - target_idx gets a STAR marker; others get DOT marker
+
+    IMPORTANT BEHAVIOR (per your request):
+      - No clamping of box corners to [0,1] (prevents “growing/shrinking” illusion).
+      - No outer padding/border is added.
+      - Normalized coords are mapped to actual canvas size (W,H); overflow is naturally clipped by PIL.
     """
     colors = gen_colors(num_colors)
 
-    # Create background image
-    if background_img:
-        img = background_img
+    # --- Background ---
+    if background_img is not None:
+        img = background_img.copy()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
     else:
         if square:
             img = Image.new("RGB", (256, 256), color=(255, 255, 255))
         else:
             img = Image.new("RGB", (256, int(4 / 3 * 256)), color=(255, 255, 255))
 
+    W, H = img.size
     draw = ImageDraw.Draw(img, "RGBA")
 
-    # Convert inputs to CPU tensors (safe for PIL drawing)
-    if torch.is_tensor(layout):
-        layout_t = layout.detach().cpu()
-    else:
-        layout_t = torch.tensor(layout)
+    # --- Inputs -> CPU tensors ---
+    layout_t = layout.detach().cpu() if torch.is_tensor(layout) else torch.tensor(layout)
+    feats_t = features.detach().cpu() if torch.is_tensor(features) else torch.tensor(features)
 
-    if torch.is_tensor(features):
-        feats_t = features.detach().cpu()
-    else:
-        feats_t = torch.tensor(features)
+    # Do NOT clamp positions/corners; only guard against negative sizes (w,h)
+    if layout_t.numel() > 0 and layout_t.shape[-1] >= 4:
+        layout_t = layout_t.clone()
+        layout_t[:, 2:4] = torch.clamp(layout_t[:, 2:4], min=0.0)
 
-    layout_t = torch.clip(layout_t, 0, 1)
-
-    # Prepare influence percentages if provided
+    # --- Prepare influence percentages if provided ---
     influence_pct = None
     if influence is not None:
-        if torch.is_tensor(influence):
-            infl_t = influence.detach().cpu()
-        else:
-            infl_t = torch.tensor(influence)
+        infl_t = influence.detach().cpu() if torch.is_tensor(influence) else torch.tensor(influence)
 
-        # Expect shape [S, 3]
         if infl_t.dim() != 2 or infl_t.size(-1) != 3:
             raise ValueError(f"influence must have shape [S,3], got {tuple(infl_t.shape)}")
 
-        # Influence power = magnitude (so negatives do not create negative opacity)
-        power = infl_t.abs()  # does NOT modify original tensor
-
-        # Per-category normalization over elements (sum to 1 per column)
+        power = infl_t.abs()  # [S,3], magnitude-based so negatives don’t produce negative opacity
         denom = power.sum(dim=0, keepdim=True)  # [1,3]
-        influence_pct = torch.where(
-            denom > 0,
-            power / denom,
-            torch.zeros_like(power),
-        )  # [S,3] in [0,1]
+        influence_pct = torch.where(denom > 0, power / denom, torch.zeros_like(power))  # [S,3] in [0,1]
 
-    # Convert layout to pixel boxes
+    # --- Boxes in normalized coords (NO CLAMP) ---
+    S = int(layout_t.shape[0])
+    if S == 0:
+        return img
+
     if format == "ltwh":
-        box = torch.stack(
-            [layout_t[:, 0], layout_t[:, 1], layout_t[:, 2] + layout_t[:, 0], layout_t[:, 3] + layout_t[:, 1]],
+        box_n = torch.stack(
+            [
+                layout_t[:, 0],
+                layout_t[:, 1],
+                layout_t[:, 0] + layout_t[:, 2],
+                layout_t[:, 1] + layout_t[:, 3],
+            ],
             dim=1,
         )
     elif format == "xywh":
-        box = torch.stack(
+        box_n = torch.stack(
             [
                 layout_t[:, 0] - layout_t[:, 2] / 2,
                 layout_t[:, 1] - layout_t[:, 3] / 2,
@@ -372,22 +384,39 @@ def draw_xai_layout(
             dim=1,
         )
     elif format == "ltrb":
-        box = torch.stack(
+        box_n = torch.stack(
             [
                 layout_t[:, 0],
                 layout_t[:, 1],
-                torch.maximum(layout_t[:, 0], layout_t[:, 2]),
-                torch.maximum(layout_t[:, 1], layout_t[:, 3]),
+                layout_t[:, 2],
+                layout_t[:, 3],
             ],
             dim=1,
         )
     else:
         raise ValueError(f"Error: {format} format not supported.")
 
-    box = 255 * torch.clamp(box, 0, 1)
+    # Ensure correct ordering (robust if corners are swapped)
+    x1n = torch.minimum(box_n[:, 0], box_n[:, 2])
+    x2n = torch.maximum(box_n[:, 0], box_n[:, 2])
+    y1n = torch.minimum(box_n[:, 1], box_n[:, 3])
+    y2n = torch.maximum(box_n[:, 1], box_n[:, 3])
+    box_n = torch.stack([x1n, y1n, x2n, y2n], dim=1)
 
-    # Validate target_idx
-    S = int(layout_t.shape[0])
+    # --- Convert normalized coords to pixels using actual canvas size (W,H), no clamping ---
+    sx = float(W - 1)
+    sy = float(H - 1)
+    box = torch.stack(
+        [
+            box_n[:, 0] * sx,
+            box_n[:, 1] * sy,
+            box_n[:, 2] * sx,
+            box_n[:, 3] * sy,
+        ],
+        dim=1,
+    )
+
+    # --- Validate target_idx ---
     if target_idx is not None:
         try:
             target_idx = int(target_idx)
@@ -408,11 +437,10 @@ def draw_xai_layout(
             angle += step
         return pts
 
-    # Draw elements
+    # --- Draw elements ---
     for i in range(S):
-        # Category color (kept from your original function)
         cat_raw = feats_t[i].item()
-        cat = int(cat_raw) - 1  # keep your original convention
+        cat = int(cat_raw) - 1
         if cat < 0:
             continue
 
@@ -420,45 +448,33 @@ def draw_xai_layout(
 
         x1, y1, x2, y2 = box[i].tolist()
 
-        # Handle non-square aspect
-        if not square:
-            y1 = (4 / 3) * y1
-            y2 = (4 / 3) * y2
-
         # Influence-driven alphas
         if influence_pct is None:
-            # Original behavior (backward compatible)
             outline_rgba = tuple(col) + (200,)
             fill_rgba = tuple(col) + (64,)
             marker_alpha = None
         else:
-            pos_p = float(influence_pct[i, 0].item())   # [0,1]
-            size_p = float(influence_pct[i, 1].item())  # [0,1]
-            type_p = float(influence_pct[i, 2].item())  # [0,1]
+            pos_p = float(influence_pct[i, 0].item())
+            size_p = float(influence_pct[i, 1].item())
+            type_p = float(influence_pct[i, 2].item())
 
             marker_alpha = int(round(pos_p * 255))
             border_alpha = int(round(size_p * 255))
             fill_alpha = int(round(type_p * 255))
 
-            # Background encodes TYPE influence (opacity)
             fill_rgba = tuple(col) + (fill_alpha,)
-
-            # Border encodes SIZE influence (opacity)
             outline_rgba = (0, 0, 0, border_alpha)
 
-        # Draw background (type influence)
+        # Fill (type influence) and border (size influence)
         draw.rectangle([x1, y1, x2, y2], fill=fill_rgba)
-
-        # Draw border (size influence)
         draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(border_width))
 
-        # Draw center marker (position influence)
+        # Center marker (position influence)
         if marker_alpha is not None:
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
 
             if target_idx is not None and i == target_idx:
-                # STAR
                 pts = star_polygon(
                     cx, cy,
                     r_outer=float(star_outer_radius),
@@ -467,24 +483,10 @@ def draw_xai_layout(
                 )
                 draw.polygon(pts, fill=(0, 0, 0, marker_alpha))
             else:
-                # POINT
                 r = float(point_radius)
                 draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 0, 0, marker_alpha))
 
-    # Keep your border expansion, but make it white so it doesn’t add “extra visuals”
-    img = ImageOps.expand(img, border=2, fill=(255, 255, 255))
     return img
-
-
-def gen_colors(num_colors):
-    """
-    Generate uniformly distributed `num_colors` colors
-    :param num_colors:
-    :return:
-    """
-    palette = sns.color_palette("husl", num_colors)
-    rgb_triples = [[int(x[0]*255), int(x[1]*255), int(x[2]*255)] for x in palette]
-    return rgb_triples
 
 
 def visualize_trajectory(
@@ -538,12 +540,13 @@ def visualize_trajectory(
             max_mag_global = 1.0
 
     for t in range(T):
-        img = draw_layout(
+        img = draw_xai_layout(
             traj_bbox_xywh[t, 0, :L].detach().cpu(),
             full_cat_pred[t, 0, :L].detach().to(torch.long).cpu(),
             num_colors=num_colors,
             square=square,
         )
+
         if ig_return_xy:
             img_xai = draw_xai_layout_xy_vectors(
                 traj_bbox_xywh[t, 0, :L].detach().cpu(),

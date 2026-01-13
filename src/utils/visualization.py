@@ -69,21 +69,31 @@ def draw_xai_layout_xy_vectors(
     arrow_head_angle_deg=25,
     skip_target_arrow=True,
     global_max_mag=None,     # float; if provided -> consistent scaling across frames
+    aa_overlay=True,         # enable AA for arrows/circle
+    aa_scale=4,              # supersampling factor (3–6 is typical)
 ):
     """
     Draws layout rectangles (same coloring convention), then draws one arrow per element i:
       vector_i = (influence_xy[i,0], influence_xy[i,1])
     Arrow direction: sign of (dx,dy)
     Arrow length: magnitude sqrt(dx^2 + dy^2) scaled to arrow_max_len_px.
+
+    Rectangles remain non-antialiased.
+    Arrows + target marker are antialiased via supersampled overlay when aa_overlay=True.
     """
     colors = gen_colors(num_colors)
 
-    # Background
-    if background_img:
-        img = background_img
+    # Background (keep base as RGB; we'll composite AA overlay later)
+    if background_img is not None:
+        img = background_img.copy()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
     else:
-        img = Image.new("RGB", (256, 256), color=(255, 255, 255)) if square else Image.new("RGB", (256, int(4/3*256)), color=(255, 255, 255))
+        img = Image.new("RGB", (256, 256), color=(255, 255, 255)) if square else Image.new(
+            "RGB", (256, int(4/3*256)), color=(255, 255, 255)
+        )
 
+    W, H = img.size
     draw = ImageDraw.Draw(img, "RGBA")
 
     # Tensors -> CPU
@@ -120,7 +130,7 @@ def draw_xai_layout_xy_vectors(
         if target_idx is not None and not (0 <= target_idx < S):
             target_idx = None
 
-    # Draw rectangles first (base layout)
+    # --- 1) Draw rectangles on base (no AA, as requested) ---
     for i in range(S):
         cat_raw = feats_t[i].item()
         cat = int(cat_raw) - 1
@@ -136,34 +146,74 @@ def draw_xai_layout_xy_vectors(
         draw.rectangle([x1, y1, x2, y2], fill=tuple(col) + (64,))
         draw.rectangle([x1, y1, x2, y2], outline=tuple(col) + (200,), width=int(border_width))
 
-    # Draw arrows
-    if infl_t is not None and S > 0:
-        dx = infl_t[:, 0]
-        dy = infl_t[:, 1]
-        mag = torch.sqrt(dx*dx + dy*dy)
+    # Helper: draw arrows + circle onto a given ImageDraw with coordinate multiplier
+    def _draw_arrows_and_target(draw_obj, coord_mul: float):
+        nonlocal infl_t, target_idx
 
-        # scaling (use global max if provided for consistency across frames)
-        max_mag = float(global_max_mag) if (global_max_mag is not None) else float(mag.max().item() if mag.numel() else 0.0)
-        if max_mag <= 1e-12:
-            max_mag = 1.0
-        scale = float(arrow_max_len_px) / max_mag
+        # Draw arrows
+        if infl_t is not None and S > 0:
+            dx = infl_t[:, 0]
+            dy = infl_t[:, 1]
+            mag = torch.sqrt(dx*dx + dy*dy)
 
-        head_angle = math.radians(float(arrow_head_angle_deg))
+            # scaling (use global max if provided for consistency across frames)
+            max_mag = float(global_max_mag) if (global_max_mag is not None) else float(mag.max().item() if mag.numel() else 0.0)
+            if max_mag <= 1e-12:
+                max_mag = 1.0
+            scale = float(arrow_max_len_px) / max_mag
 
-        for i in range(S):
-            if skip_target_arrow and (target_idx is not None) and (i == target_idx):
-                continue
+            head_angle = math.radians(float(arrow_head_angle_deg))
+            shaft_w = max(1, int(round(float(arrow_width) * coord_mul)))
+            hl = float(arrow_head_len_px) * coord_mul
 
-            m = float(mag[i].item())
-            if m <= 1e-12:
-                continue
+            for i in range(S):
+                if skip_target_arrow and (target_idx is not None) and (i == target_idx):
+                    continue
 
-            # alpha by relative magnitude
-            a = int(round(255.0 * min(1.0, m / max_mag)))
-            a = max(40, a)  # keep visible
+                m = float(mag[i].item())
+                if m <= 1e-12:
+                    continue
 
-            # Arrow from element center
-            x1, y1, x2, y2 = box[i].tolist()
+                # alpha by relative magnitude
+                a = int(round(255.0 * min(1.0, m / max_mag)))
+                a = max(40, a)  # keep visible
+
+                # Arrow from element center
+                x1, y1, x2, y2 = box[i].tolist()
+                if not square:
+                    y1 = (4/3) * y1
+                    y2 = (4/3) * y2
+
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+
+                vx = float(dx[i].item()) * scale
+                vy = float(dy[i].item()) * scale
+
+                ex = cx + vx
+                ey = cy + vy
+
+                # scale coords for supersampling layer
+                cx_s, cy_s = cx * coord_mul, cy * coord_mul
+                ex_s, ey_s = ex * coord_mul, ey * coord_mul
+
+                # main shaft
+                draw_obj.line([cx_s, cy_s, ex_s, ey_s], fill=(0, 0, 0, a), width=shaft_w)
+
+                # arrow head (two lines)
+                ang = math.atan2(vy, vx)
+
+                xh1 = ex_s - hl * math.cos(ang - head_angle)
+                yh1 = ey_s - hl * math.sin(ang - head_angle)
+                xh2 = ex_s - hl * math.cos(ang + head_angle)
+                yh2 = ey_s - hl * math.sin(ang + head_angle)
+
+                draw_obj.line([ex_s, ey_s, xh1, yh1], fill=(0, 0, 0, a), width=shaft_w)
+                draw_obj.line([ex_s, ey_s, xh2, yh2], fill=(0, 0, 0, a), width=shaft_w)
+
+        # Draw target marker (circle)
+        if target_idx is not None and 0 <= target_idx < S:
+            x1, y1, x2, y2 = box[target_idx].tolist()
             if not square:
                 y1 = (4/3) * y1
                 y2 = (4/3) * y2
@@ -171,37 +221,32 @@ def draw_xai_layout_xy_vectors(
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
 
-            vx = float(dx[i].item()) * scale
-            vy = float(dy[i].item()) * scale
+            # scale for layer
+            cx_s, cy_s = cx * coord_mul, cy * coord_mul
+            r = 6.0 * coord_mul
+            w = max(1, int(round(2.0 * coord_mul)))
 
-            ex = cx + vx
-            ey = cy + vy
+            draw_obj.ellipse([cx_s - r, cy_s - r, cx_s + r, cy_s + r], outline=(0, 0, 0, 255), width=w)
 
-            # main shaft
-            draw.line([cx, cy, ex, ey], fill=(0, 0, 0, a), width=int(arrow_width))
+    # --- 2) Draw arrows + circle (AA overlay if enabled) ---
+    if aa_overlay and (infl_t is not None or target_idx is not None):
+        aa = int(max(1, aa_scale))
+        # supersampled transparent overlay
+        overlay_hi = Image.new("RGBA", (W * aa, H * aa), (0, 0, 0, 0))
+        draw_hi = ImageDraw.Draw(overlay_hi, "RGBA")
 
-            # arrow head (two lines)
-            ang = math.atan2(vy, vx)
-            hl = float(arrow_head_len_px)
+        _draw_arrows_and_target(draw_hi, coord_mul=float(aa))
 
-            xh1 = ex - hl * math.cos(ang - head_angle)
-            yh1 = ey - hl * math.sin(ang - head_angle)
-            xh2 = ex - hl * math.cos(ang + head_angle)
-            yh2 = ey - hl * math.sin(ang + head_angle)
+        # downsample overlay to base size with high-quality filter
+        overlay = overlay_hi.resize((W, H), resample=Image.LANCZOS)
 
-            draw.line([ex, ey, xh1, yh1], fill=(0, 0, 0, a), width=int(arrow_width))
-            draw.line([ex, ey, xh2, yh2], fill=(0, 0, 0, a), width=int(arrow_width))
-
-    # Mark target with a star-like marker (simple)
-    if target_idx is not None and 0 <= target_idx < S:
-        x1, y1, x2, y2 = box[target_idx].tolist()
-        if not square:
-            y1 = (4/3) * y1
-            y2 = (4/3) * y2
-        cx = (x1 + x2) / 2.0
-        cy = (y1 + y2) / 2.0
-        r = 6.0
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, 255), width=2)
+        # composite onto base
+        base_rgba = img.convert("RGBA")
+        base_rgba = Image.alpha_composite(base_rgba, overlay)
+        img = base_rgba.convert("RGB")
+    else:
+        # fallback: draw directly on base (non-AA)
+        _draw_arrows_and_target(draw, coord_mul=1.0)
 
     img = ImageOps.expand(img, border=2, fill=(255, 255, 255))
     return img

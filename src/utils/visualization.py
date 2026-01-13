@@ -425,18 +425,6 @@ def draw_xai_layout(
         if target_idx is not None and not (0 <= target_idx < S):
             target_idx = None
 
-    def star_polygon(cx, cy, r_outer, r_inner, num_points=5):
-        pts = []
-        angle = -math.pi / 2  # start upwards
-        step = math.pi / num_points
-        for k in range(num_points * 2):
-            r = r_outer if (k % 2 == 0) else r_inner
-            x = cx + r * math.cos(angle)
-            y = cy + r * math.sin(angle)
-            pts.append((x, y))
-            angle += step
-        return pts
-
     # --- Draw elements ---
     for i in range(S):
         cat_raw = feats_t[i].item()
@@ -473,18 +461,12 @@ def draw_xai_layout(
         if marker_alpha is not None:
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
+            r = float(point_radius)
 
             if target_idx is not None and i == target_idx:
-                pts = star_polygon(
-                    cx, cy,
-                    r_outer=float(star_outer_radius),
-                    r_inner=float(star_outer_radius) * 0.5,
-                    num_points=5,
-                )
-                draw.polygon(pts, fill=(0, 0, 0, marker_alpha))
-            else:
-                r = float(point_radius)
                 draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 0, 0, marker_alpha))
+            else:
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, marker_alpha))
 
     return img
 

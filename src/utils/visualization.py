@@ -303,7 +303,7 @@ def draw_xai_layout(
     *,
     border_width=2,
     point_radius=3,
-    star_outer_radius=7,
+    influence_mode=None,
 ):
     """
     layout (S, 4): bbox in normalized coordinates (not forcibly clamped to [0,1])
@@ -351,12 +351,22 @@ def draw_xai_layout(
     if influence is not None:
         infl_t = influence.detach().cpu() if torch.is_tensor(influence) else torch.tensor(influence)
 
-        if infl_t.dim() != 2 or infl_t.size(-1) != 3:
-            raise ValueError(f"influence must have shape [S,3], got {tuple(infl_t.shape)}")
+        if influence_mode == "grouped_all":
+            if infl_t.dim() == 1:
+                infl_t = infl_t.unsqueeze(-1)  # [S,1]
+            if infl_t.dim() != 2 or infl_t.size(-1) != 1:
+                raise ValueError(f"influence must have shape [S,1] for grouped_all, got {tuple(infl_t.shape)}")
 
-        power = infl_t.abs()  # [S,3], magnitude-based so negatives don’t produce negative opacity
-        denom = power.sum(dim=0, keepdim=True)  # [1,3]
-        influence_pct = torch.where(denom > 0, power / denom, torch.zeros_like(power))  # [S,3] in [0,1]
+            power = infl_t.abs()  # [S,1]
+            denom = power.sum(dim=0, keepdim=True)  # [1,1]
+            influence_pct = torch.where(denom > 0, power / denom, torch.zeros_like(power))  # [S,1] in [0,1]
+        else:
+            if infl_t.dim() != 2 or infl_t.size(-1) != 3:
+                raise ValueError(f"influence must have shape [S,3], got {tuple(infl_t.shape)}")
+
+            power = infl_t.abs()  # [S,3]
+            denom = power.sum(dim=0, keepdim=True)  # [1,3]
+            influence_pct = torch.where(denom > 0, power / denom, torch.zeros_like(power))  # [S,3] in [0,1]
 
     # --- Boxes in normalized coords (NO CLAMP) ---
     S = int(layout_t.shape[0])
@@ -456,23 +466,34 @@ def draw_xai_layout(
             fill_rgba = tuple(col) + (64,)
             marker_alpha = None
         else:
-            pos_p = float(influence_pct[i, 0].item())
-            size_p = float(influence_pct[i, 1].item())
-            type_p = float(influence_pct[i, 2].item())
+            if influence_mode == "grouped_all":
+                p = float(influence_pct[i, 0].item())  # [0,1]
+                a = int(round(p * 255))
 
-            marker_alpha = int(round(pos_p * 255))
-            border_alpha = int(round(size_p * 255))
-            fill_alpha = int(round(type_p * 255))
+                # Border & fill use the SAME base colors as influence=None, but with influence-derived alpha
+                outline_rgba = tuple(col) + (a,)
+                fill_rgba = tuple(col) + (a,)
 
-            fill_rgba = tuple(col) + (fill_alpha,)
-            outline_rgba = (0, 0, 0, border_alpha)
+                # Marker only for target element; others nothing
+                marker_alpha = a if (target_idx is not None and i == target_idx) else None
+            else:
+                pos_p = float(influence_pct[i, 0].item())
+                size_p = float(influence_pct[i, 1].item())
+                type_p = float(influence_pct[i, 2].item())
+
+                marker_alpha = int(round(pos_p * 255))
+                border_alpha = int(round(size_p * 255))
+                fill_alpha = int(round(type_p * 255))
+
+                fill_rgba = tuple(col) + (fill_alpha,)
+                outline_rgba = (0, 0, 0, border_alpha)
 
         # Fill (type influence) and border (size influence) on BASE (non-AA)
         draw.rectangle([x1, y1, x2, y2], fill=fill_rgba)
         draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(border_width))
 
         # Center marker (position influence) on AA OVERLAY
-        if marker_alpha is not None:
+        if marker_alpha is not None and (influence_mode != "grouped_all" or (target_idx is not None and i == target_idx)):
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
             r = float(point_radius)
@@ -511,7 +532,7 @@ def visualize_trajectory(
         out_root="./vis_traj",
         num_colors=26,
         square=False,
-        ig_return_xy=False,
+        influence_mode="grouped_all",
 ) -> None:
     """
     Saves one animated GIF per instance showing the trajectory over T steps.
@@ -539,6 +560,8 @@ def visualize_trajectory(
     T = int(traj_bbox_xywh.shape[0])
 
     max_mag_global = None
+    ig_return_xy = influence_mode == "per_xy"
+
     if ig_return_xy:
         infl_xy = influence[:, 0, :L].detach().cpu()  # [T, L, 2]
         mags = torch.sqrt(infl_xy[..., 0] ** 2 + infl_xy[..., 1] ** 2).reshape(-1)
@@ -575,8 +598,9 @@ def visualize_trajectory(
                 num_colors=num_colors,
                 square=square,
                 format="xywh",
-                influence=influence[t, 0, :L].detach().cpu(),  # [L,3]
+                influence=influence[t, 0, :L].detach().cpu(),  # [L,1] or [L,3]
                 target_idx=target_idx,
+                influence_mode=influence_mode,
             )
 
         # Ensure GIF-compatible mode
@@ -601,7 +625,7 @@ def visualize_trajectory(
         print(f"[NORMAL] Saved trajectory GIF with {T} frames to: {gif_path}")
 
     if len(frames_xai) != 0:
-        gif_path = os.path.join(out_dir, f"{target_idx}_{target_attr}.gif")
+        gif_path = os.path.join(out_dir, f"{target_idx}_{target_attr}_{influence_mode}.gif")
 
         # Save as looping GIF
         frames_xai[0].save(

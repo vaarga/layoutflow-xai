@@ -1,4 +1,3 @@
-from typing import Text
 import torch
 import torch.nn as nn
 import numpy as np
@@ -123,7 +122,7 @@ class LayoutFlow(BaseGenModel):
 
         return xt, ut
 
-    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name='', ig_return_xy=False):
+    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name='', influence_mode='grouped_all'):
         """
         If ig=True:
           - returns exactly as full_traj=True plus influence tensor at the end:
@@ -197,7 +196,7 @@ class LayoutFlow(BaseGenModel):
                 cond_x=cond_x,
                 cond_mask=cond_mask,
                 dataset_name=dataset_name,
-                ig_return_xy=ig_return_xy
+                influence_mode=influence_mode
             )
             # Requirement: if ig=True, return exactly like full_traj=True plus influence
             return traj, cat, cont_cat, influence
@@ -326,8 +325,8 @@ class LayoutFlow(BaseGenModel):
             t_span: torch.Tensor,  # [T]
             cond_x: torch.Tensor,  # [B, N, D]
             cond_mask: torch.Tensor,  # [B, N, D]
-            dataset_name: Text,
-            ig_return_xy: bool
+            dataset_name: str,
+            influence_mode: str,
     ) -> torch.Tensor:
         """
         Default (existing) behavior:
@@ -352,7 +351,7 @@ class LayoutFlow(BaseGenModel):
         target_idx, out_dims = self.resolve_ig_target(batch)
 
         # only meaningful for position targets!
-        ig_return_xy = ig_return_xy and (out_dims == (0, 1))
+        ig_return_xy = influence_mode == "per_xy" and (out_dims == (0, 1))
 
         cond_mask_f = cond_mask.to(dtype=cond_x.dtype)
 
@@ -514,11 +513,14 @@ class LayoutFlow(BaseGenModel):
                     diff_arr[k] = diff_s
                     rel_delta_arr[k] = rel_s
 
-                    pos_inf = torch.abs(attr[..., 0]) + torch.abs(attr[..., 1])  # [B,N]
-                    size_inf = torch.abs(attr[..., 2]) + torch.abs(attr[..., 3])  # [B,N]
-                    type_inf = torch.abs(attr[..., self.geom_dim:]).sum(dim=-1)  # [B,N]
-
-                    infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1)  # [B,N,3]
+                    if influence_mode == "grouped_all":
+                        elem_inf = torch.abs(attr).sum(dim=-1)  # [B,N]
+                        infl_k = elem_inf.unsqueeze(-1)  # [B,N,1]
+                    else:
+                        pos_inf = torch.abs(attr[..., 0]) + torch.abs(attr[..., 1])  # [B,N]
+                        size_inf = torch.abs(attr[..., 2]) + torch.abs(attr[..., 3])  # [B,N]
+                        type_inf = torch.abs(attr[..., self.geom_dim:]).sum(dim=-1)  # [B,N]
+                        infl_k = torch.stack([pos_inf, size_inf, type_inf], dim=-1)  # [B,N,3]
 
                     if valid_elem_mask is not None:
                         infl_k = infl_k * valid_elem_mask.unsqueeze(-1)

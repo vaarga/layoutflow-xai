@@ -183,12 +183,22 @@ def main(cfg: DictConfig):
                             model.target_idx = target_idx
                             model.target_attr = target_attr
 
+                            # Can also be grouped_psc or per_xy (for the later the target attribution must be position)
+                            influence_mode = str(getattr(cfg, "influence_mode", "grouped_all"))
+                            allowed = {"grouped_all", "grouped_psc", "per_xy"}
+
+                            if influence_mode not in allowed:
+                                raise ValueError(
+                                    f"Invalid influence_mode='{influence_mode}'. "
+                                    f"Must be one of: {sorted(allowed)}"
+                                )
+
                             # Run inference with integrated gradients
                             geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch,
                                                                                             task=cfg.task,
                                                                                             ig=True,
                                                                                             dataset_name=cfg.dataset_name,
-                                                                                            ig_return_xy=cfg.ig_return_xy)
+                                                                                            influence_mode=influence_mode)
 
                             print("geom_traj:", geom_traj.shape)  # [T, B, N, 4]
                             print("cat_traj:", cat_traj.shape)  # [T, B, N]
@@ -208,7 +218,7 @@ def main(cfg: DictConfig):
                                     influence=influence,
                                     target_idx=target_idx,
                                     target_attr=target_attr,
-                                    ig_return_xy=cfg.ig_return_xy
+                                    influence_mode=influence_mode
                                 )
 
                         except Exception as e:

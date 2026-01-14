@@ -6,6 +6,8 @@ from PIL import Image, ImageDraw, ImageOps
 
 from utils.utils import convert_bbox
 
+DEFAULT_WIDTH = 2
+MARKER_WIDTH_ADJ = 2
 
 def gen_colors(num_colors):
     """
@@ -73,8 +75,6 @@ def draw_xai_layout_xy_vectors(
     influence_xy=None,   # [L, 2] = [dx_contrib, dy_contrib] (SIGNED)
     target_idx=None,
     *,
-    border_width=2,
-    arrow_width=2,
     arrow_max_len_px=40,     # longest arrow length (pixels)
     arrow_head_len_px=14,
     arrow_head_angle_deg=25,
@@ -197,7 +197,7 @@ def draw_xai_layout_xy_vectors(
 
         x1, y1, x2, y2 = box[i].tolist()
         draw.rectangle([x1, y1, x2, y2], fill=tuple(col) + (64,))
-        draw.rectangle([x1, y1, x2, y2], outline=tuple(col) + (200,), width=int(border_width))
+        draw.rectangle([x1, y1, x2, y2], outline=tuple(col) + (200,), width=int(DEFAULT_WIDTH))
 
     # Helper: draw arrows + target circle onto a given ImageDraw, scaling coords by coord_mul
     def _draw_arrows_and_target(draw_obj, coord_mul: float):
@@ -216,7 +216,7 @@ def draw_xai_layout_xy_vectors(
             scale = float(arrow_max_len_px) / max_mag
 
             head_angle = math.radians(float(arrow_head_angle_deg))
-            shaft_w = max(1, int(round(float(arrow_width) * coord_mul)))
+            shaft_w = max(1, int(round(float(DEFAULT_WIDTH) * coord_mul)))
             hl = float(arrow_head_len_px) * coord_mul
 
             for i in range(S):
@@ -262,14 +262,12 @@ def draw_xai_layout_xy_vectors(
             cy = (y1 + y2) / 2.0
 
             cx_s, cy_s = cx * coord_mul, cy * coord_mul
-            r = 3.0 * coord_mul
-            w = max(1, int(round(2.0 * coord_mul)))
+            marker_width = DEFAULT_WIDTH + MARKER_WIDTH_ADJ
+            r = (marker_width / 2) * coord_mul
 
             draw_obj.ellipse(
                 [cx_s - r, cy_s - r, cx_s + r, cy_s + r],
-                outline=(0, 0, 0, 255),
                 fill=(0, 0, 0, 255),
-                width=w,
             )
 
     # --- 2) AA overlay for arrows + circle ---
@@ -301,9 +299,8 @@ def draw_xai_layout(
     influence=None,      # [S, 3] = [pos, size, type] raw IG (can be negative)
     target_idx=None,     # int
     *,
-    border_width=2,
-    point_radius=3,
     influence_mode=None,
+    t=None,
 ):
     """
     layout (S, 4): bbox in normalized coordinates (not forcibly clamped to [0,1])
@@ -447,7 +444,7 @@ def draw_xai_layout(
         overlay_hi = Image.new("RGBA", (W * aa, H * aa), (0, 0, 0, 0))
         draw_hi = ImageDraw.Draw(overlay_hi, "RGBA")
 
-    marker_outline_w = 1  # logical width at base resolution
+    k = 10
 
     # --- Draw elements ---
     for i in range(S):
@@ -459,57 +456,63 @@ def draw_xai_layout(
         col = colors[cat] if 0 <= cat < len(colors) else [0, 0, 0]
 
         x1, y1, x2, y2 = box[i].tolist()
+        outline_width = DEFAULT_WIDTH
+        marker_alpha = 255
+        fill_alpha = 64
+        outline_alpha = 200
+        marker_color = (0, 0, 0)
+        fill_color = tuple(col)
+        outline_color = tuple(col)
 
-        # Influence-driven alphas
-        if influence_pct is None:
-            outline_rgba = tuple(col) + (200,)
-            fill_rgba = tuple(col) + (64,)
-            marker_alpha = None
-        else:
+        if influence_mode == "grouped_all" or influence_mode == "grouped_psc":
             if influence_mode == "grouped_all":
                 p = float(influence_pct[i, 0].item())  # [0,1]
                 a = int(round(p * 255))
 
-                # Border & fill use the SAME base colors as influence=None, but with influence-derived alpha
-                outline_rgba = tuple(col) + (a,)
-                fill_rgba = tuple(col) + (a,)
-
-                # Marker only for target element; others nothing
-                marker_alpha = a if (target_idx is not None and i == target_idx) else None
+                fill_alpha = a
+                outline_alpha = a
+            # "grouped_psc" influence mode
             else:
-                pos_p = float(influence_pct[i, 0].item())
-                size_p = float(influence_pct[i, 1].item())
-                type_p = float(influence_pct[i, 2].item())
+                s_inf = (influence[i, 1] * k).round()
+                outline_width = s_inf
 
-                marker_alpha = int(round(pos_p * 255))
-                border_alpha = int(round(size_p * 255))
-                fill_alpha = int(round(type_p * 255))
+                fill_alpha = 128 if (target_idx is not None and i == target_idx) else 64
 
-                fill_rgba = tuple(col) + (fill_alpha,)
-                outline_rgba = (0, 0, 0, border_alpha)
+                # For debugging
+                if i == 6:
+                    print(f'{t+1} s: ', s_inf)
 
-        # Fill (type influence) and border (size influence) on BASE (non-AA)
+        fill_rgba = fill_color + (fill_alpha, )
+        outline_rgba = outline_color + (outline_alpha, )
+
         draw.rectangle([x1, y1, x2, y2], fill=fill_rgba)
-        draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(border_width))
+        draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(outline_width))
 
-        # Center marker (position influence) on AA OVERLAY
-        if marker_alpha is not None and (influence_mode != "grouped_all" or (target_idx is not None and i == target_idx)):
+        if (influence_mode == "grouped_all" and i == target_idx) or influence_mode == "grouped_psc":
+            marker_rgba = marker_color + (marker_alpha,)
+
+            if influence_mode == "grouped_all":
+                marker_width = DEFAULT_WIDTH + MARKER_WIDTH_ADJ
+            else:
+                p_inf = (influence[i, 0] * k).round()
+                marker_width = p_inf
+
+                if i == 6:
+                    print(f'{t + 1} p: ', p_inf)
+
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
-            r = float(point_radius)
+            r = marker_width / 2
 
             # draw at supersampled resolution
             cx_s, cy_s = cx * aa, cy * aa
             r_s = r * aa
             bbox_s = [cx_s - r_s, cy_s - r_s, cx_s + r_s, cy_s + r_s]
 
-            if target_idx is not None and i == target_idx:
-                # filled AA circle
-                draw_hi.ellipse(bbox_s, fill=(0, 0, 0, marker_alpha))
+            if influence_mode == "grouped_psc" and i != target_idx:
+                draw_hi.rectangle(bbox_s, fill=marker_rgba)
             else:
-                # outlined AA circle (scale stroke width too)
-                w_s = max(1, int(round(marker_outline_w * aa)))
-                draw_hi.ellipse(bbox_s, outline=(0, 0, 0, marker_alpha), width=w_s)
+                draw_hi.ellipse(bbox_s, fill=marker_rgba)
 
     # --- Composite AA markers back onto base ---
     if overlay_hi is not None:
@@ -601,6 +604,7 @@ def visualize_trajectory(
                 influence=influence[t, 0, :L].detach().cpu(),  # [L,1] or [L,3]
                 target_idx=target_idx,
                 influence_mode=influence_mode,
+                t=t
             )
 
         # Ensure GIF-compatible mode

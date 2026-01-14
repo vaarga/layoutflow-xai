@@ -9,6 +9,7 @@ from utils.utils import convert_bbox
 DEFAULT_WIDTH = 2
 MARKER_WIDTH_ADJ = 2
 
+
 def gen_colors(num_colors):
     """
     Generate uniformly distributed `num_colors` colors
@@ -460,9 +461,12 @@ def draw_xai_layout(
         marker_alpha = 255
         fill_alpha = 64
         outline_alpha = 200
+        badge_alpha = 255
+
         marker_color = (0, 0, 0)
         fill_color = tuple(col)
         outline_color = tuple(col)
+        badge_color = (0, 0, 0)
 
         if influence_mode == "grouped_all" or influence_mode == "grouped_psc":
             if influence_mode == "grouped_all":
@@ -478,15 +482,24 @@ def draw_xai_layout(
 
                 fill_alpha = 128 if (target_idx is not None and i == target_idx) else 64
 
-                # For debugging
-                if i == 6:
-                    print(f'{t+1} s: ', s_inf)
-
         fill_rgba = fill_color + (fill_alpha, )
         outline_rgba = outline_color + (outline_alpha, )
 
         draw.rectangle([x1, y1, x2, y2], fill=fill_rgba)
         draw.rectangle([x1, y1, x2, y2], outline=outline_rgba, width=int(outline_width))
+
+        if influence_mode == "grouped_psc":
+            t_inf = (influence[i, 2] * k).round()
+
+            if t_inf != 0:
+                half = t_inf / 2.0
+
+                bx1, by1 = x2 - half, y2 - half
+                bx2, by2 = x2 + half, y2 + half
+
+                badge_rgba = badge_color + (badge_alpha,)
+
+                draw.rectangle([bx1, by1, bx2, by2], fill=badge_rgba)
 
         if (influence_mode == "grouped_all" and i == target_idx) or influence_mode == "grouped_psc":
             marker_rgba = marker_color + (marker_alpha,)
@@ -497,9 +510,6 @@ def draw_xai_layout(
                 p_inf = (influence[i, 0] * k).round()
                 marker_width = p_inf
 
-                if i == 6:
-                    print(f'{t + 1} p: ', p_inf)
-
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
             r = marker_width / 2
@@ -509,10 +519,7 @@ def draw_xai_layout(
             r_s = r * aa
             bbox_s = [cx_s - r_s, cy_s - r_s, cx_s + r_s, cy_s + r_s]
 
-            if influence_mode == "grouped_psc" and i != target_idx:
-                draw_hi.rectangle(bbox_s, fill=marker_rgba)
-            else:
-                draw_hi.ellipse(bbox_s, fill=marker_rgba)
+            draw_hi.ellipse(bbox_s, fill=marker_rgba)
 
     # --- Composite AA markers back onto base ---
     if overlay_hi is not None:

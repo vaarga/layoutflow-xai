@@ -6,6 +6,7 @@ import numpy as np
 from src.models.BaseGenModel import BaseGenModel
 from src.utils.fid_calculator import FID_score 
 from src.utils.analog_bit import AnalogBit
+from src.utils.explainability import compute_ig_influence_per_timestamp
 
 
 class LayoutDMx(BaseGenModel):
@@ -57,6 +58,11 @@ class LayoutDMx(BaseGenModel):
         self.mask_padding = mask_padding
         self.cf_guidance = cf_guidance
 
+        # XAI Parameters
+        self.target_idx = None
+        self.target_attr = None
+        self.ig_steps = 40
+
         # Training Parameters
         self.loss_fcn = nn.MSELoss() if loss_fcn!='l1' else nn.L1Loss()
         self.add_loss = add_loss
@@ -86,41 +92,81 @@ class LayoutDMx(BaseGenModel):
 
         return loss
 
-
-    def inference(self, batch, task=None, full_traj=False):        
-        # Sample initial noise 
+    def inference(self, batch, task=None, full_traj=False, ig: bool = False, dataset_name: str = "",
+                  influence_mode: str = "grouped_all"):
+        # Sample initial noise
         x0 = self.sampler.sample(batch)
+
         # Get conditioning mask
         cond_mask = self.get_cond_mask(batch)
+
         # Get conditioning sample
         if self.attr_encoding == 'AnalogBit':
-            conv_type = self.analog_bit.encode(batch['type']) 
+            conv_type = self.analog_bit.encode(batch['type'])
         else:
-            conv_type = batch['type'].unsqueeze(-1) / (self.num_cat-1)
+            conv_type = batch['type'].unsqueeze(-1) / (self.num_cat - 1)
+
         gt = torch.cat([batch['bbox'], conv_type], dim=-1)
         cond_x = self.sampler.preprocess(gt)
         cond_x = batch['mask'] * cond_x + (~batch['mask']) * gt
-        
+
         # Sample using denoising model
         self.DM_model.set_timesteps(self.inference_steps)
-        input = cond_mask * x0 + (1-cond_mask) * cond_x
-        traj = []
-        for t in self.DM_model.timesteps:
-            timestep = t*torch.ones((x0.shape[0],), device=self.device)/1000
-            noisy_residual = self(input, cond_mask, timestep)
-            prev_noisy_sample = self.DM_model.step(noisy_residual, t, input).prev_sample
-            input = cond_mask * prev_noisy_sample + (1-cond_mask) * cond_x
-            traj.append(prev_noisy_sample)
-        traj = torch.stack(traj)
-        traj = self.sampler.preprocess(traj, reverse=True)
-        
+
+        input = cond_mask * x0 + (1 - cond_mask) * cond_x
+
+        traj_steps = []
+
+        # --- NEW: store attribution states/timesteps (preprocessed space) ---
+        if ig:
+            traj_pre_for_ig = []
+            t_for_ig = []
+
+        with torch.no_grad():
+            for t in self.DM_model.timesteps:
+                timestep = (t * torch.ones((x0.shape[0],), device=self.device)) / 1000.0  # [B]
+
+                # --- NEW: save the exact model input state that produces the residual at this step ---
+                if ig:
+                    traj_pre_for_ig.append(input.detach())
+                    t_for_ig.append(timestep.detach())
+
+                noisy_residual = self(input, cond_mask, timestep)
+                prev_noisy_sample = self.DM_model.step(noisy_residual, t, input).prev_sample
+
+                input = cond_mask * prev_noisy_sample + (1 - cond_mask) * cond_x
+                traj_steps.append(prev_noisy_sample)
+
+        traj_pre = torch.stack(traj_steps)  # [T,B,N,D] (preprocessed space trajectory samples used for decoding)
+        traj = self.sampler.preprocess(traj_pre, reverse=True)
+
         # Post-processing and decoding of obtained trajectory
         if self.attr_encoding == 'AnalogBit':
-            cont_cat = self.analog_bit.decode(traj[...,self.geom_dim:])
+            cont_cat = self.analog_bit.decode(traj[..., self.geom_dim:])
         else:
-            cont_cat = traj[..., -1] * (self.num_cat-1) + 0.5
-        cont_cat = (1-cond_mask[:,:,-1]) * batch['type'] + cond_mask[:,:,-1] * cont_cat
-        cat = torch.clip(cont_cat.to(torch.int), 0, self.num_cat-1)
-        traj = (1-cond_mask[:,:,:self.geom_dim]) * batch['bbox'][None] + cond_mask[:,:,:self.geom_dim] * traj[...,:self.geom_dim]
-        
+            cont_cat = traj[..., -1] * (self.num_cat - 1) + 0.5
+
+        cont_cat = (1 - cond_mask[:, :, -1]) * batch['type'] + cond_mask[:, :, -1] * cont_cat
+        cat = torch.clip(cont_cat.to(torch.int), 0, self.num_cat - 1)
+
+        traj = (1 - cond_mask[:, :, :self.geom_dim]) * batch['bbox'][None] + cond_mask[:, :, :self.geom_dim] * traj[...,
+                                                                                                               :self.geom_dim]
+
+        # --- NEW: IG computation ---
+        if ig:
+            traj_pre_for_ig = torch.stack(traj_pre_for_ig, dim=0)  # [T,B,N,D]
+            t_for_ig = torch.stack(t_for_ig, dim=0)  # [T,B]
+
+            influence = compute_ig_influence_per_timestamp(
+                model=self,
+                batch=batch,
+                traj_pre=traj_pre_for_ig,
+                t_span=t_for_ig,
+                cond_x=cond_x,
+                cond_mask=cond_mask,
+                dataset_name=dataset_name,
+                influence_mode=influence_mode,
+            )
+            return traj, cat, cont_cat, influence
+
         return (traj, cat, cont_cat) if full_traj else (traj[-1], cat[-1])

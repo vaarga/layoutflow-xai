@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import json
-import os
 from torchcfm import ConditionalFlowMatcher
 from torchdyn.core import NeuralODE
 
@@ -10,13 +8,6 @@ from src.models.BaseGenModel import BaseGenModel
 from src.utils.fid_calculator import FID_score
 from src.utils.analog_bit import AnalogBit
 from src.utils.explainability import compute_ig_influence_per_timestamp
-
-
-def load_ig_stats(stats_path: str):
-    with open(stats_path, "r") as f:
-        stats = json.load(f)
-
-    return stats
 
 
 class LayoutFlow(BaseGenModel):
@@ -53,9 +44,6 @@ class LayoutFlow(BaseGenModel):
         self.fid_calc_every_n = fid_calc_every_n
         self.cond = cond
         self.attr_encoding = attr_encoding
-        self.target_idx = None  # int
-        self.target_attr = None  # str: "position" or "size" (also supports "x","y","w","h")
-        self.ig_steps = 40  # number of IG steps per timestamp (trade-off speed vs quality)
         if attr_encoding == 'AnalogBit':
             self.analog_bit = AnalogBit(num_cat)
         if fid_calc_every_n != 0: 
@@ -72,6 +60,11 @@ class LayoutFlow(BaseGenModel):
         self.sampler = sampler
         self.mask_padding = mask_padding
         self.cf_guidance = cf_guidance
+
+        # XAI Parameters
+        self.target_idx = None
+        self.target_attr = None
+        self.ig_steps = 40
 
         # Training Parameters
         self.train_traj = train_traj
@@ -123,7 +116,8 @@ class LayoutFlow(BaseGenModel):
 
         return xt, ut
 
-    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name='', influence_mode='grouped_all'):
+    def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name: str = '',
+                  influence_mode: str = 'grouped_all'):
         """
         If ig=True:
           - returns exactly as full_traj=True plus influence tensor at the end:

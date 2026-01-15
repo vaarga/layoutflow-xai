@@ -215,23 +215,30 @@ def main(cfg: DictConfig):
                             print(
                                 f"[XAI] instance_idx={current_instance_idx} | length={L} | sampled target_idx={target_idx}")
 
+                            model.instance_idx = current_instance_idx
                             model.target_idx = target_idx
                             model.target_attr = target_attr
 
                             influence_mode = str(getattr(cfg, "influence_mode", "grouped_all"))
                             allowed = {"grouped_all", "grouped_psc", "per_xy"}
+
                             if influence_mode not in allowed:
                                 raise ValueError(
                                     f"Invalid influence_mode='{influence_mode}'. "
                                     f"Must be one of: {sorted(allowed)}"
                                 )
 
+                            # Output directory per instance
+                            out_dir = os.path.join("./vis_traj", cfg.dataset_name, cfg.task, influence_mode, target_attr)
+                            os.makedirs(out_dir, exist_ok=True)
+
                             geom_traj, cat_traj, cont_cat_traj, influence = model.inference(
                                 batch,
                                 task=cfg.task,
                                 ig=True,
                                 dataset_name=cfg.dataset_name,
-                                influence_mode=influence_mode
+                                influence_mode=influence_mode,
+                                out_dir=out_dir,
                             )
 
                             geom_pred = geom_traj[-1]
@@ -246,8 +253,8 @@ def main(cfg: DictConfig):
                                     instance_idx=current_instance_idx,  # IMPORTANT: scalar per run
                                     influence=influence,
                                     target_idx=target_idx,
-                                    target_attr=target_attr,
-                                    influence_mode=influence_mode
+                                    influence_mode=influence_mode,
+                                    out_dir=out_dir
                                 )
 
                         except Exception as e:

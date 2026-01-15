@@ -81,21 +81,24 @@ def build_null_elem_data_from_stats(
     return torch.cat([bbox, type_data], dim=-1)  # [1,1,4+type_dim]
 
 
-def resolve_ig_target(model, batch) -> Tuple[int, Tuple[int, ...]]:
-    """
-    Reads:
-      - model.target_idx, model.target_attr (recommended), or
-      - batch['target_idx'], batch['target_attr'] (optional fallback).
-    Returns (target_idx, out_dims).
-    """
+def resolve_ig_target(model, batch) -> tuple[
+    int, int, tuple[int] | tuple[int, int] | tuple[int, int, int, int] | tuple[int, int, int, int, int]
+]:
+    instance_idx = getattr(model, "target_idx", None)
     target_idx = getattr(model, "target_idx", None)
     target_attr = getattr(model, "target_attr", None)
 
+    if instance_idx is None and isinstance(batch, dict) and ("instance_idx" in batch):
+        instance_idx = str(batch["instance_idx"])
     if target_idx is None and isinstance(batch, dict) and ("target_idx" in batch):
         target_idx = int(batch["target_idx"])
     if target_attr is None and isinstance(batch, dict) and ("target_attr" in batch):
         target_attr = str(batch["target_attr"])
 
+    if instance_idx is None:
+        raise ValueError(
+            "[IG] instance_idx not set. Set model.instance_idx or provide batch['instance_idx']."
+        )
     if target_idx is None:
         raise ValueError(
             "[IG] target_idx not set. Set model.target_idx or provide batch['target_idx']."
@@ -120,13 +123,15 @@ def resolve_ig_target(model, batch) -> Tuple[int, Tuple[int, ...]]:
         out_dims = (3,)
     elif ta in ["geometry"]:
         out_dims = (0, 1, 2, 3)
+    elif ta in ["category"]:
+        out_dims = (4, 5, 6, 7, 8)
     else:
         raise ValueError(
             f"[IG] Unsupported target_attr='{target_attr}'. "
-            "Use: position|size|geometry|x|y|w|h."
+            "Use: position|size|geometry|x|y|w|h|category"
         )
 
-    return int(target_idx), out_dims
+    return int(instance_idx), int(target_idx), out_dims
 
 
 def compute_ig_influence_per_timestamp(
@@ -138,6 +143,7 @@ def compute_ig_influence_per_timestamp(
     cond_mask: torch.Tensor,  # [B,N,D] 0/1 mask (1 = free, 0 = conditioned)
     dataset_name: str,
     influence_mode: str,
+    out_dir: str,
 ) -> torch.Tensor:
     """
     Mirrors LayoutFlow's IG outputs.
@@ -155,7 +161,7 @@ def compute_ig_influence_per_timestamp(
             "[IG] captum is required. Install with: pip install captum"
         ) from e
 
-    target_idx, out_dims = resolve_ig_target(model, batch)
+    instance_idx, target_idx, out_dims = resolve_ig_target(model, batch)
     ig_return_xy = (influence_mode == "per_xy") and (out_dims == (0, 1))
 
     cond_mask_f = cond_mask.to(dtype=cond_x.dtype)
@@ -321,17 +327,30 @@ def compute_ig_influence_per_timestamp(
 
                 influences.append(infl_k)
 
-    # prints identical style to your LayoutFlow
     if ig_return_xy:
-        print("X: delta mean:", float(delta_arr_x.mean()))
-        print("X: diff mean:", float(diff_arr_x.mean()))
-        print("X: rel_delta mean:", float(rel_delta_arr_x.mean()))
-        print("Y: delta mean:", float(delta_arr_y.mean()))
-        print("Y: diff mean:", float(diff_arr_y.mean()))
-        print("Y: rel_delta mean:", float(rel_delta_arr_y.mean()))
+        stats = {
+            "x": {
+                "delta_mean": float(delta_arr_x.mean()),
+                "diff_mean": float(diff_arr_x.mean()),
+                "rel_delta_mean": float(rel_delta_arr_x.mean()),
+            },
+            "y": {
+                "delta_mean": float(delta_arr_y.mean()),
+                "diff_mean": float(diff_arr_y.mean()),
+                "rel_delta_mean": float(rel_delta_arr_y.mean()),
+            },
+        }
     else:
-        print("delta mean:", float(delta_arr.mean()))
-        print("diff mean:", float(diff_arr.mean()))
-        print("rel_delta mean:", float(rel_delta_arr.mean()))
+        stats = {
+                "delta_mean": float(delta_arr.mean()),
+                "diff_mean": float(diff_arr.mean()),
+                "rel_delta_mean": float(rel_delta_arr.mean()),
+        }
+
+    stats["influences"] = [t.detach().cpu().tolist()[0] for t in influences]
+    out_path = os.path.join(out_dir, f"{instance_idx}_{target_idx}.json")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(stats, f, indent=2)
 
     return torch.stack(influences, dim=0)  # [T,B,N,?]

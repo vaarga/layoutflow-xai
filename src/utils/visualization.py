@@ -537,12 +537,11 @@ def visualize_trajectory(
         instance_idx,
         influence,
         target_idx,
-        target_attr,
         *,
-        out_root="./vis_traj",
         num_colors=26,
         square=False,
         influence_mode="grouped_all",
+        out_dir=None,
 ) -> None:
     """
     Saves one animated GIF per instance showing the trajectory over T steps.
@@ -556,10 +555,6 @@ def visualize_trajectory(
 
     # Convert trajectory bboxes to xywh because draw_xai_layout uses xywh
     traj_bbox_xywh = convert_bbox(full_geom_pred, f'{cfg.data.format}->xywh')
-
-    # Output directory per instance
-    out_dir = os.path.join(out_root, cfg.dataset_name, cfg.task, str(instance_idx))
-    os.makedirs(out_dir, exist_ok=True)
 
     fps = 5.0
     duration_ms = int(round(1000.0 / fps))
@@ -620,7 +615,7 @@ def visualize_trajectory(
         frames_xai.append(img_xai.convert("P", palette=Image.ADAPTIVE))
 
     if len(frames) != 0:
-        gif_path = os.path.join(out_dir, f"default.gif")
+        gif_path = os.path.join(out_dir, f"{instance_idx}.gif")
 
         # Save as looping GIF
         frames[0].save(
@@ -634,7 +629,7 @@ def visualize_trajectory(
         )
 
     if len(frames_xai) != 0:
-        gif_path = os.path.join(out_dir, f"{target_idx}_{target_attr}_{influence_mode}.gif")
+        gif_path = os.path.join(out_dir, f"{instance_idx}_{target_idx}.gif")
 
         # Save as looping GIF
         frames_xai[0].save(

@@ -62,6 +62,7 @@ class LayoutFlow(BaseGenModel):
         self.cf_guidance = cf_guidance
 
         # XAI Parameters
+        self.instance_idx = None
         self.target_idx = None
         self.target_attr = None
         self.ig_steps = 40
@@ -117,7 +118,7 @@ class LayoutFlow(BaseGenModel):
         return xt, ut
 
     def inference(self, batch, full_traj=False, task=None, ig: bool = False, dataset_name: str = '',
-                  influence_mode: str = 'grouped_all'):
+                  influence_mode: str = 'grouped_all', out_dir: str = '.'):
         """
         If ig=True:
           - returns exactly as full_traj=True plus influence tensor at the end:
@@ -192,7 +193,8 @@ class LayoutFlow(BaseGenModel):
                 cond_x=cond_x,
                 cond_mask=cond_mask,
                 dataset_name=dataset_name,
-                influence_mode=influence_mode
+                influence_mode=influence_mode,
+                out_dir=out_dir
             )
             # Requirement: if ig=True, return exactly like full_traj=True plus influence
             return traj, cat, cont_cat, influence

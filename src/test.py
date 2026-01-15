@@ -1,6 +1,6 @@
 import random
 import os
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, ListConfig
 import hydra
 from hydra.utils import instantiate, call
 import rootutils
@@ -77,9 +77,24 @@ def main(cfg: DictConfig):
     with torch.no_grad():
         device = torch.device(cfg.device)
         pin_memory = should_pin_memory()
-        instance_idx = getattr(cfg, "instance_idx", -1)
-        run_all = (instance_idx == -1)
+        instance_ids_cfg = getattr(cfg, "instance_ids", -1)
+
+        # Support either int or list of ints for instance_ids
+        if isinstance(instance_ids_cfg, (ListConfig, list, tuple)):
+            instance_ids_req = [int(x) for x in instance_ids_cfg]
+            if any(x == -1 for x in instance_ids_req):
+                raise ValueError("instance_ids list cannot include -1. Use instance_ids: -1 for run_all.")
+            run_all = False
+        else:
+            instance_ids_req = [int(instance_ids_cfg)]
+            run_all = (instance_ids_req[0] == -1)
+
         do_explain = getattr(cfg, "explain", False)
+
+        if not run_all:
+            selected_instances = set(instance_ids_req)
+        else:
+            selected_instances = None
 
         val_loader = instantiate(cfg.dataset, dataset={'split': 'validation', 'lex_order': cfg.lex_order},
                                  shuffle=False, batch_size=1024, pin_memory=pin_memory)
@@ -158,11 +173,18 @@ def main(cfg: DictConfig):
             else:
                 bbox, label, pad_mask, bbox_for_miou = [], [], [], []
 
+                # Track which instances we actually processed (used later for visualization filenames)
+                instance_ids_used = []
+
                 # --- GENERATION LOOP ---
+                processed = 0
                 for i, batch in enumerate(tqdm(test_loader, disable=(not run_all))):
                     if not run_all:
-                        if i != instance_idx:
+                        if i not in selected_instances:
                             continue
+
+                    current_instance_idx = i
+                    instance_ids_used.append(current_instance_idx)
 
                     batch['type'] = batch['type'].to(device)
                     batch['bbox'] = batch['bbox'].to(device)
@@ -176,35 +198,42 @@ def main(cfg: DictConfig):
 
                     if do_explain and not run_all:
                         try:
-                            # Provide IG target settings to the model (from cfg)
-                            target_idx = int(getattr(cfg, "target_idx", 0))
                             target_attr = str(getattr(cfg, "target_attr", "position"))
+
+                            # Determine valid element count L for this instance
+                            if torch.is_tensor(batch["length"]):
+                                L = int(batch["length"][0].item())
+                            else:
+                                L = int(batch["length"][0])
+
+                            if L <= 0:
+                                raise RuntimeError(f"Invalid length L={L} for instance {current_instance_idx}.")
+
+                            # Sample uniformly from valid indices [0, L-1]
+                            target_idx = random.randrange(L)
+
+                            print(
+                                f"[XAI] instance_idx={current_instance_idx} | length={L} | sampled target_idx={target_idx}")
 
                             model.target_idx = target_idx
                             model.target_attr = target_attr
 
-                            # Can also be grouped_psc or per_xy (for the later the target attribution must be position)
                             influence_mode = str(getattr(cfg, "influence_mode", "grouped_all"))
                             allowed = {"grouped_all", "grouped_psc", "per_xy"}
-
                             if influence_mode not in allowed:
                                 raise ValueError(
                                     f"Invalid influence_mode='{influence_mode}'. "
                                     f"Must be one of: {sorted(allowed)}"
                                 )
 
-                            # Run inference with integrated gradients
-                            geom_traj, cat_traj, cont_cat_traj, influence = model.inference(batch,
-                                                                                            task=cfg.task,
-                                                                                            ig=True,
-                                                                                            dataset_name=cfg.dataset_name,
-                                                                                            influence_mode=influence_mode)
+                            geom_traj, cat_traj, cont_cat_traj, influence = model.inference(
+                                batch,
+                                task=cfg.task,
+                                ig=True,
+                                dataset_name=cfg.dataset_name,
+                                influence_mode=influence_mode
+                            )
 
-                            print("geom_traj:", geom_traj.shape)  # [T, B, N, 4]
-                            print("cat_traj:", cat_traj.shape)  # [T, B, N]
-                            print("influence:", influence.shape)  # [T, B, N, 3]
-
-                            # Keep pipeline compatible: use final timestep for generated layout
                             geom_pred = geom_traj[-1]
                             cat_pred = cat_traj[-1]
 
@@ -214,7 +243,7 @@ def main(cfg: DictConfig):
                                     batch=batch,
                                     full_geom_pred=geom_traj,
                                     full_cat_pred=cat_traj,
-                                    instance_idx=instance_idx,
+                                    instance_idx=current_instance_idx,  # IMPORTANT: scalar per run
                                     influence=influence,
                                     target_idx=target_idx,
                                     target_attr=target_attr,
@@ -226,7 +255,6 @@ def main(cfg: DictConfig):
                             geom_pred, cat_pred = model.inference(batch, task=cfg.task)
 
                     else:
-                        # Standard Inference
                         geom_pred, cat_pred = model.inference(batch, task=cfg.task)
 
                     # --- Collect Results (Common Path) ---
@@ -238,9 +266,18 @@ def main(cfg: DictConfig):
                     pad_mask.append(pad_maski)
 
                     if not run_all:
+                        processed += 1
+                        if processed >= len(instance_ids_req):
+                            break
+
+                    # Preserve original intent: cfg.small is only meaningful in run_all mode
+                    if run_all and cfg.small:
                         break
-                    if cfg.small:
-                        break
+
+                # Optional but helpful: fail fast if user requested indices that were never reached
+                if not run_all and processed < len(instance_ids_req):
+                    missing = [x for x in instance_ids_req if x not in set(instance_ids_used)]
+                    raise RuntimeError(f"Did not find/process requested instance_ids values: {missing}")
 
                 bbox = convert_bbox(torch.cat(bbox), f'{cfg.data.format}->xywh')
                 ltrb_bbox, label, pad_mask = convert_bbox(bbox, 'xywh->ltrb'), torch.cat(label), torch.cat(pad_mask)
@@ -288,7 +325,10 @@ def main(cfg: DictConfig):
         os.makedirs('./vis', exist_ok=True)
         for i in range(min(20, len(bbox))):
             L = torch.sum(pad_mask[i]).long()
-            fname = f'./vis/{instance_idx}.png' if not run_all else f'./vis/{i}.png'
+            if not run_all:
+                fname = f'./vis/{instance_ids_used[i]}.png'
+            else:
+                fname = f'./vis/{i}.png'
             draw_layout(bbox[i, :L], label[i, :L], num_colors=26, square=False).save(fname)
 
     if cfg.multirun:

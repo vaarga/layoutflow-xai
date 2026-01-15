@@ -633,8 +633,6 @@ def visualize_trajectory(
             optimize=False,
         )
 
-        print(f"[NORMAL] Saved trajectory GIF with {T} frames to: {gif_path}")
-
     if len(frames_xai) != 0:
         gif_path = os.path.join(out_dir, f"{target_idx}_{target_attr}_{influence_mode}.gif")
 
@@ -648,5 +646,3 @@ def visualize_trajectory(
             disposal=2,  # restore to background between frames (reduces artifacts)
             optimize=False,
         )
-
-        print(f"[XAI] Saved trajectory GIF with {T} frames to: {gif_path}")

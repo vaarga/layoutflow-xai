@@ -8,7 +8,7 @@ dataset:
   permute_elements: False
 
 batch_size: 512
-num_workers: 1
+num_workers: 12
 pin_memory: True
 persistent_workers: True
 shuffle: True

@@ -65,7 +65,7 @@ class LayoutFlow(BaseGenModel):
         self.instance_idx = None
         self.target_idx = None
         self.target_attr = None
-        self.ig_steps = 40
+        self.ig_steps = 100
 
         # Training Parameters
         self.train_traj = train_traj

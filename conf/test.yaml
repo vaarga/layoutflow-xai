@@ -19,11 +19,12 @@ calc_miou: False
 multirun: False
 visualize: True
 logdir: ./wandb
-seed: 92
+seed: 99
 explain: True
-influence_mode: per_xy
+influence_mode: grouped_psc
 target_attr: position
 instance_ids: [4]
+model_name: ${hydra:runtime.choices.model}
 dataset_name: ${hydra:runtime.choices.dataset}
 
 hydra:  

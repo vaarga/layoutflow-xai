@@ -229,7 +229,8 @@ def main(cfg: DictConfig):
                                 )
 
                             # Output directory per instance
-                            out_dir = os.path.join("./vis_traj", cfg.dataset_name, cfg.task, influence_mode, target_attr)
+                            out_dir = os.path.join("./vis_traj", cfg.model_name, str(seed), cfg.dataset_name, cfg.task,
+                                                   influence_mode, target_attr)
                             os.makedirs(out_dir, exist_ok=True)
 
                             geom_traj, cat_traj, cont_cat_traj, influence = model.inference(

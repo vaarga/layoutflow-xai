@@ -556,7 +556,7 @@ def visualize_trajectory(
     # Convert trajectory bboxes to xywh because draw_xai_layout uses xywh
     traj_bbox_xywh = convert_bbox(full_geom_pred, f'{cfg.data.format}->xywh')
 
-    fps = 5.0
+    fps = 8.0
     duration_ms = int(round(1000.0 / fps))
 
     # Render frames

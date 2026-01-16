@@ -84,7 +84,7 @@ def build_null_elem_data_from_stats(
 def resolve_ig_target(model, batch) -> tuple[
     int, int, tuple[int] | tuple[int, int] | tuple[int, int, int, int] | tuple[int, int, int, int, int]
 ]:
-    instance_idx = getattr(model, "target_idx", None)
+    instance_idx = getattr(model, "instance_idx", None)
     target_idx = getattr(model, "target_idx", None)
     target_attr = getattr(model, "target_attr", None)
 

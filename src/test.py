@@ -213,7 +213,7 @@ def main(cfg: DictConfig):
                             target_idx = random.randrange(L)
 
                             print(
-                                f"[XAI] instance_idx={current_instance_idx} | length={L} | sampled target_idx={target_idx}")
+                                f"[XAI] instance_idx={current_instance_idx} | length={L} | target_idx={target_idx}")
 
                             model.instance_idx = current_instance_idx
                             model.target_idx = target_idx

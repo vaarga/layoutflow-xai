@@ -216,6 +216,7 @@ def compute_ig_influence_per_timestamp(
     )  # [1,1,D_data]
     null_elem_pre = model.sampler.preprocess(null_elem_data)  # [1,1,D_pre]
 
+    ig_steps = getattr(model, "ig_steps")
     T = traj_pre.shape[0]
     influences = []
 
@@ -252,7 +253,7 @@ def compute_ig_influence_per_timestamp(
                     inputs=(x_k, cond_x),
                     baselines=(baseline_x_free, baseline_cond),
                     additional_forward_args=(t_k,),
-                    n_steps=int(getattr(model, "ig_steps", 32)),
+                    n_steps=ig_steps,
                     return_convergence_delta=True,
                 )
                 attr_free_x, attr_cond_x = attr_x_pair
@@ -272,7 +273,7 @@ def compute_ig_influence_per_timestamp(
                     inputs=(x_k, cond_x),
                     baselines=(baseline_x_free, baseline_cond),
                     additional_forward_args=(t_k,),
-                    n_steps=int(getattr(model, "ig_steps", 32)),
+                    n_steps=ig_steps,
                     return_convergence_delta=True,
                 )
                 attr_free_y, attr_cond_y = attr_y_pair
@@ -298,7 +299,7 @@ def compute_ig_influence_per_timestamp(
                     inputs=(x_k, cond_x),
                     baselines=(baseline_x_free, baseline_cond),
                     additional_forward_args=(t_k,),
-                    n_steps=int(getattr(model, "ig_steps", 32)),
+                    n_steps=ig_steps,
                     return_convergence_delta=True,
                 )
                 attr_free, attr_cond = attr_pair

@@ -215,6 +215,8 @@ def main(cfg: DictConfig):
                             print(
                                 f"[XAI] instance_idx={current_instance_idx} | length={L} | target_idx={target_idx}")
 
+                            ig_steps = getattr(cfg, "ig_steps", 100)
+                            model.ig_steps = ig_steps
                             model.instance_idx = current_instance_idx
                             model.target_idx = target_idx
                             model.target_attr = target_attr
@@ -229,8 +231,8 @@ def main(cfg: DictConfig):
                                 )
 
                             # Output directory per instance
-                            out_dir = os.path.join("./vis_traj", cfg.model_name, str(seed), cfg.dataset_name, cfg.task,
-                                                   influence_mode, target_attr)
+                            out_dir = os.path.join("./vis_traj", cfg.model_name, str(ig_steps), str(seed),
+                                                   cfg.dataset_name, cfg.task, influence_mode, target_attr)
                             os.makedirs(out_dir, exist_ok=True)
 
                             geom_traj, cat_traj, cont_cat_traj, influence = model.inference(

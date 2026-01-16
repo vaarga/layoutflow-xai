@@ -62,7 +62,7 @@ class LayoutDMx(BaseGenModel):
         self.instance_idx = None
         self.target_idx = None
         self.target_attr = None
-        self.ig_steps = 100
+        self.ig_steps = None
 
         # Training Parameters
         self.loss_fcn = nn.MSELoss() if loss_fcn!='l1' else nn.L1Loss()

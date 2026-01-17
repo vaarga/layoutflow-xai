@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Tuple, Optional
+from typing import Optional
 
 import numpy as np
 import torch
+from captum.attr import IntegratedGradients
 
 
 def load_ig_stats(stats_path: str) -> dict:
@@ -81,7 +82,7 @@ def build_null_elem_data_from_stats(
     return torch.cat([bbox, type_data], dim=-1)  # [1,1,4+type_dim]
 
 
-def resolve_ig_target(model, batch) -> tuple[
+def resolve_ig_target(model, batch, dataset_name: str) -> tuple[
     int, int, tuple[int] | tuple[int, int] | tuple[int, int, int, int] | tuple[int, int, int, int, int]
 ]:
     instance_idx = getattr(model, "instance_idx", None)
@@ -124,7 +125,10 @@ def resolve_ig_target(model, batch) -> tuple[
     elif ta in ["geometry"]:
         out_dims = (0, 1, 2, 3)
     elif ta in ["category"]:
-        out_dims = (4, 5, 6, 7, 8)
+        if dataset_name == 'RICO':
+            out_dims = (4, 5, 6, 7, 8)
+        else:
+            out_dims = (4, 5, 6)
     else:
         raise ValueError(
             f"[IG] Unsupported target_attr='{target_attr}'. "
@@ -146,22 +150,13 @@ def compute_ig_influence_per_timestamp(
     out_dir: str,
 ) -> torch.Tensor:
     """
-    Mirrors LayoutFlow's IG outputs.
-
     Default:
       influence: [T,B,N,3] (pos,size,type) OR [T,B,N,1] for influence_mode="grouped_all"
     Special:
       if influence_mode=="per_xy" AND target_attr resolves to (0,1),
       influence: [T,B,N,2] where last dim is per-element contribution to target x and target y outputs.
     """
-    try:
-        from captum.attr import IntegratedGradients
-    except Exception as e:
-        raise ImportError(
-            "[IG] captum is required. Install with: pip install captum"
-        ) from e
-
-    instance_idx, target_idx, out_dims = resolve_ig_target(model, batch)
+    instance_idx, target_idx, out_dims = resolve_ig_target(model, batch, dataset_name)
     ig_return_xy = (influence_mode == "per_xy") and (out_dims == (0, 1))
 
     cond_mask_f = cond_mask.to(dtype=cond_x.dtype)
@@ -220,7 +215,6 @@ def compute_ig_influence_per_timestamp(
     T = traj_pre.shape[0]
     influences = []
 
-    # convergence diagnostics (kept identical to your LayoutFlow logic)
     delta_arr = np.zeros(T, dtype=np.float32)
     diff_arr = np.zeros(T, dtype=np.float32)
     rel_delta_arr = np.zeros(T, dtype=np.float32)

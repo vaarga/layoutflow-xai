@@ -20,4 +20,8 @@ In `conf/test.yaml`, we defined the following configuration options:
 
 With the `calculate_stats` option in `conf/train.yaml`, the training step will be disabled and replaced by the calculations needed to construct the Integrated Gradients baseline we use (which differs across datasets).
 
+## Results
+
+For all output produced across our experiments—run with different combinations of configuration settings—see our [Hugging Face LayoutFlow XAI Dataset repository](https://huggingface.co/datasets/vaarga/layoutflow-xai).
+
 Special thanks to Patricia Claudia Moțiu and Marc Eduard Frîncu for their collaboration.

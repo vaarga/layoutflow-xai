@@ -6,7 +6,6 @@ results/
 vis/
 vis_traj/
 datasets/
-stats/
 *.pyc
 *.log
 .venv/

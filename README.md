@@ -1,7 +1,10 @@
-# Query-Driven Attribution Framework for Iterative Layout Generation (LayoutFlow XAI)
+# LayoutFlow XAI
 
-This repository is the official implementation of the 2026 paper “Query-Driven Attribution Framework for Iterative Layout Generation”, where we apply the framework to the LayoutFlow method and choose Integrated Gradients as the attribution method.
-It is based on the official implementation of the LayoutFlow 2024 paper ([project page](https://julianguerreiro.github.io/layoutflow/) | [paper](https://arxiv.org/pdf/2403.18187)).
+> **Note**: This repository contains the source code for the research paper titled "Query-Driven Attribution Framework 
+> for Iterative Layout Generation", presented at CISIM 2026 and published in the Springer LNCS proceedings (DOI: 
+> [10.1007/978-3-032-38939-8_11](https://doi.org/10.1007/978-3-032-38939-8_11)).
+
+The code in the repository is based on the official implementation of the LayoutFlow 2024 paper ([project page](https://julianguerreiro.github.io/layoutflow/) | [paper](https://arxiv.org/pdf/2403.18187)).
 
 ## Setup and Run
 
